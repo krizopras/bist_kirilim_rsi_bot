@@ -28,14 +28,14 @@ import math
 
 # --- Ayarlar ve Güvenlik ---
 LOG_FILE = os.getenv('LOG_FILE', 'trading_bot.log')
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 IS_RENDER = os.getenv("RENDER", "false").lower() == "true"
 HEALTH_CHECK_PORT = int(os.getenv("PORT", 8080))
-if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    raise ValueError("TELEGRAM_TOKEN ve TELELEGRAM_CHAT_ID environment variable'ları gerekli!")
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    raise ValueError("TELEGRAM_BOT_TOKEN ve TELEGRAM_CHAT_ID environment variable'ları gerekli!")
 
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("bist_scanner")
@@ -172,12 +172,12 @@ async def start_health_server(loop, stop_event):
 # ----------------------- Utility Functions -----------------------
 async def send_telegram(text: str):
     """Telegram mesajı gönderir, aiohttp ile asenkron."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("Telegram not configured, printing:")
         print(text)
         return
     
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
@@ -587,7 +587,7 @@ async def run_scan_async():
     logger.info("✅ Tarama tamamlandı. Bir sonraki tarama %s dakika sonra.", CHECK_EVERY_MIN)
 
 async def send_enhanced_alert(signal: SignalInfo):
-    side_key = "LONG" if signal.direction == "BULLISH" else "SHORT"
+    side_key = "AL" if signal.direction == "BULLISH" else "SAT"
     key = (signal.symbol, signal.timeframe, side_key)
     
     last_alert_time = get_last_alert(signal.symbol, side_key)
@@ -596,7 +596,7 @@ async def send_enhanced_alert(signal: SignalInfo):
         return
 
     emoji = "🟢📈" if signal.direction == "BULLISH" else "🔴📉"
-    direction_text = "YUKARI KIRILIM" if signal.direction == "BULLISH" else "AŞAĞI KIRILIM"
+    direction_text = "AL" if signal.direction == "BULLISH" else "SAT"
     strength_stars = "⭐" * min(5, int(signal.strength_score / 2))
     
     if signal.volume_ratio > 5.0: volume_emoji = "🚀"
