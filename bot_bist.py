@@ -812,8 +812,8 @@ async def main():
         while True:
             now_ist = dt.datetime.now(IST_TZ)
             
-            # Günlük rapor: her gün 18:00 IST
-            if now_ist.hour == 18 and now_ist.date() != last_report_date:
+            # Günlük rapor: her gün 18:30 IST
+            if now_ist.hour == 18 and now_ist.minute == 30 and now_ist.date() != last_report_date:
                 await send_daily_report(asyncio.get_running_loop())
                 last_report_date = now_ist.date()
                 
