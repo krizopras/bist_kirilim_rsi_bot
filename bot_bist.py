@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import investpy
 import math
-import yfinance as yf # yfinance kütüphanesi eklendi
+import yfinance as yf
 
 # --- Ayarlar ve Güvenlik ---
 LOG_FILE = os.getenv('LOG_FILE', 'trading_bot.log')
@@ -402,11 +402,11 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
     # Mum Formasyonu Puanı (YENİ)
     if signal.candle_formation:
         if signal.candle_formation in ["Hammer", "Bullish Engulfing", "Piercing Pattern", "Three White Soldiers"]:
-            score += 2.5 # Güçlü yükseliş sinyalleri
+            score += 2.5
         elif signal.candle_formation in ["Inverted Hammer", "Bearish Engulfing", "Dark Cloud Cover", "Three Black Crows"]:
-            score += 2.5 # Güçlü düşüş sinyalleri
+            score += 2.5
         elif signal.candle_formation == "Doji":
-            score += 1.0 # Kararsızlık, potansiyel dönüş
+            score += 1.0
             
     # Çoklu Zaman Dilimi Puanı (YENİ)
     if signal.multi_tf_score:
@@ -553,7 +553,6 @@ async def run_scan_async():
         
         for result in results:
             if isinstance(result, Exception):
-                # Hata zaten fetch_and_analyze_data içinde loglandığı için burada tekrar loglamaya gerek yok
                 continue
             
             if result:
@@ -567,15 +566,12 @@ async def run_scan_async():
     for symbol, signals in multi_tf_signals.items():
         if len(signals) > 0:
             total_score = 0
-            # Zaman dilimi uyumuna göre puanlama (1d -> 4h -> 1h -> 15m)
             weights = {'1d': 4, '4h': 3, '1h': 2, '15m': 1}
             for signal in signals:
                 total_score += signal.strength_score * weights.get(signal.timeframe, 1)
 
-            # En yüksek puanlı sinyali ana sinyal olarak seç
             main_signal = max(signals, key=lambda s: s.strength_score)
             
-            # Çoklu zaman dilimi puanını ekle
             main_signal.multi_tf_score = total_score / sum(weights.values())
             main_signal.strength_score = calculate_signal_strength(main_signal)
             all_final_signals.append(main_signal)
@@ -590,15 +586,143 @@ async def run_scan_async():
     LAST_SCAN_TIME = datetime.datetime.now(timezone.utc)
     logger.info("✅ Tarama tamamlandı. Bir sonraki tarama %s dakika sonra.", CHECK_EVERY_MIN)
 
+# **YENİ EKLEME** - Sinyal veritabanı fonksiyonları
+def get_signal_db():
+    db_file = "signals_db.json"
+    if not os.path.exists(db_file) or os.stat(db_file).st_size == 0:
+        return {}
+    with open(db_file, "r") as f:
+        return json.load(f)
+
+def save_signal_db(data):
+    with open("signals_db.json", "w") as f:
+        json.dump(data, f, indent=4)
+
+def save_signal_to_db(signal: SignalInfo):
+    data = get_signal_db()
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    
+    if today_str not in data:
+        data[today_str] = {}
+        
+    signal_entry = {
+        "timeframe": signal.timeframe,
+        "direction": signal.direction,
+        "price": signal.price,
+        "strength_score": signal.strength_score,
+        "timestamp": signal.timestamp
+    }
+    
+    data[today_str][signal.symbol] = signal_entry
+    save_signal_db(data)
+
+async def send_daily_report(loop):
+    data = get_signal_db()
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    
+    if today_str not in data:
+        logger.info("Günlük rapor için sinyal verisi bulunamadı.")
+        return
+        
+    signals_today = data[today_str]
+    bullish_signals = []
+    bearish_signals = []
+    
+    for symbol, signal_info in signals_today.items():
+        try:
+            stock_data = await loop.run_in_executor(None, lambda: yf.Ticker(f"{symbol}.IS").history(period="1d", interval="1d"))
+            
+            if not stock_data.empty:
+                end_price = stock_data['Close'].iloc[-1]
+                change_pct = ((end_price - signal_info['price']) / signal_info['price']) * 100
+                signal_info['end_price'] = end_price
+                signal_info['performance_pct'] = change_pct
+                
+                if signal_info['direction'] == "BULLISH":
+                    bullish_signals.append(signal_info)
+                else:
+                    bearish_signals.append(signal_info)
+                    
+        except Exception as e:
+            logger.error(f"Gün sonu raporu için veri çekme hatası: {symbol} - {e}")
+            continue
+            
+    total_signals = len(bullish_signals) + len(bearish_signals)
+    if total_signals == 0:
+        return
+
+    bull_success = sum(1 for s in bullish_signals if s['performance_pct'] > 0)
+    bear_success = sum(1 for s in bearish_signals if s['performance_pct'] < 0)
+    
+    bull_rate = (bull_success / len(bullish_signals)) * 100 if bullish_signals else 0
+    bear_rate = (bear_success / len(bearish_signals)) * 100 if bearish_signals else 0
+    overall_rate = ((bull_success + bear_success) / total_signals) * 100 if total_signals > 0 else 0
+    
+    bull_avg_gain = sum(s['performance_pct'] for s in bullish_signals if s['performance_pct'] > 0) / bull_success if bull_success > 0 else 0
+    bull_avg_loss = sum(s['performance_pct'] for s in bullish_signals if s['performance_pct'] < 0) / (len(bullish_signals) - bull_success) if (len(bullish_signals) - bull_success) > 0 else 0
+    
+    bear_avg_gain = sum(s['performance_pct'] for s in bearish_signals if s['performance_pct'] > 0) / (len(bearish_signals) - bear_success) if (len(bearish_signals) - bear_success) > 0 else 0
+    bear_avg_loss = sum(s['performance_pct'] for s in bearish_signals if s['performance_pct'] < 0) / bear_success if bear_success > 0 else 0
+    
+    msg = f"""📊📈📉 **Günlük Sinyal Raporu** ({today_str})
+    
+✅ **Genel İstatistikler:**
+- Toplam Sinyal Sayısı: {total_signals}
+- Genel Başarı Oranı: %{overall_rate:.1f}
+    
+🟢 **Boğa Sinyalleri:**
+- Sinyal Sayısı: {len(bullish_signals)}
+- Başarı Oranı: %{bull_rate:.1f}
+- Ortalama Kazanç: +%{bull_avg_gain:.2f}
+- Ortalama Kayıp: %{bull_avg_loss:.2f}
+    
+🔴 **Ayı Sinyalleri:**
+- Sinyal Sayısı: {len(bearish_signals)}
+- Başarı Oranı: %{bear_rate:.1f}
+- Ortalama Kazanç: +%{bear_avg_gain:.2f}
+- Ortalama Kayıp: %{bear_avg_loss:.2f}
+"""
+    await send_telegram(msg)
+    
+async def main():
+    logger.info("🚀 Gelişmiş BIST Sinyal Botu başlatılıyor...")
+    stop_event = asyncio.Event()
+
+    health_task = asyncio.create_task(start_health_server(asyncio.get_running_loop(), stop_event))
+    
+    await run_scan_async()
+    
+    last_daily_report_day = datetime.datetime.now().day
+    
+    while not stop_event.is_set():
+        now = datetime.datetime.now()
+        
+        # Günlük Rapor (Her gün 18:00'de)
+        if now.hour == 18 and now.day != last_daily_report_day:
+            await send_daily_report(asyncio.get_running_loop())
+            last_daily_report_day = now.day
+
+        # Ana tarama döngüsü
+        await asyncio.sleep(CHECK_EVERY_MIN * 60)
+        await run_scan_async()
+
+    await health_task
+
+# **YENİ EKLEME** - send_enhanced_alert fonksiyonunu güncelliyoruz.
 async def send_enhanced_alert(signal: SignalInfo):
     side_key = "AL" if signal.direction == "BULLISH" else "SAT"
     key = (signal.symbol, signal.timeframe, side_key)
     
+    # Bu filtre zaten mevcut ve aynı sinyalin tekrar gönderilmesini engeller.
+    # Bu kod parçasıyla, ALERT_COOLDOWN_MIN süresi içinde aynı sinyal tekrar gönderilmez.
     last_alert_time = get_last_alert(signal.symbol, side_key)
     if last_alert_time and (datetime.datetime.now(timezone.utc) - last_alert_time).total_seconds() < ALERT_COOLDOWN_MIN * 60:
         logger.info(f"⏳ {signal.symbol} için {side_key} sinyali cooldown'da.")
         return
 
+    # Sinyali veritabanına kaydet
+    save_signal_to_db(signal)
+    
     emoji = "🟢📈" if signal.direction == "BULLISH" else "🔴📉"
     direction_text = "AL" if signal.direction == "BULLISH" else "SAT"
     strength_stars = "⭐" * min(5, int(signal.strength_score / 2))
@@ -640,19 +764,6 @@ async def send_enhanced_alert(signal: SignalInfo):
     await send_telegram(msg)
     save_last_alert(signal.symbol, side_key)
 
-async def main():
-    logger.info("🚀 Gelişmiş BIST Sinyal Botu başlatılıyor...")
-    stop_event = asyncio.Event()
-
-    health_task = asyncio.create_task(start_health_server(asyncio.get_running_loop(), stop_event))
-    
-    await run_scan_async()
-    
-    while not stop_event.is_set():
-        await asyncio.sleep(CHECK_EVERY_MIN * 60)
-        await run_scan_async()
-
-    await health_task
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
