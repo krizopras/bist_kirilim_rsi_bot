@@ -38,13 +38,15 @@ services:
         value: 20
       - key: BB_MULT
         value: 2.0
+      - key: CANDLE_FORM_THRESHOLD
+        value: 0.7
       
       # Logging
       - key: LOG_LEVEL
         value: INFO
       
       # Secret variables (add these manually in Render dashboard)
-      - key: TELEGRAM_BOT_TOKEN
+      - key: TELEGRAM_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
