@@ -12,6 +12,7 @@ Tüm BIST Hisselerini Paralel Tarayan Çoklu Zaman Dilimi ve Mum Formasyonu Anal
 - Bollinger "NEAR_UPPER/NEAR_LOWER" mantığı eklendi.
 - Minimum fiyat ve TL hacmi filtreleri etkinleştirildi.
 - Sinyal tekrarını disk tabanlı cooldown ile engeller, günlük rapor Istanbul saatine göre 18:00'de gönderilir.
+- Ek olarak, botun genel durumunu ve loglarını özetleyen bir analiz raporu günlük olarak gönderilir.
 """
 
 import os
@@ -204,7 +205,6 @@ def calculate_bollinger_bands(close: pd.Series, period: int = 20, mult: float = 
     lower = middle - (std * mult)
     return upper, middle, lower
 
-# **YENİ EKLEME** - Stokastik RSI hesaplaması
 def calculate_stoch_rsi(rsi_series: pd.Series, length: int = 14, k: int = 3, d: int = 3):
     min_rsi = rsi_series.rolling(window=length).min()
     max_rsi = rsi_series.rolling(window=length).max()
@@ -213,10 +213,9 @@ def calculate_stoch_rsi(rsi_series: pd.Series, length: int = 14, k: int = 3, d: 
     stoch_rsi_k = stoch_rsi.rolling(window=k).mean()
     stoch_rsi_d = stoch_rsi_k.rolling(window=d).mean()
     if stoch_rsi_k.empty or stoch_rsi_d.empty:
-      return None, None
+        return None, None
     return float(stoch_rsi_k.iloc[-1]), float(stoch_rsi_d.iloc[-1])
 
-# **YENİ EKLEME** - Hareketli ortalama kesişim tespiti
 def detect_ma_cross(close_series: pd.Series, short_period: int, long_period: int) -> Optional[str]:
     if len(close_series) < max(short_period, long_period) + 1:
         return None
@@ -361,39 +360,31 @@ def detect_candle_formation(df: pd.DataFrame) -> Optional[str]:
 
 def calculate_signal_strength(signal: SignalInfo) -> float:
     score = 5.0
-    # RSI konumu
     if signal.direction == "BULLISH":
         if signal.rsi < 30: score += 3.0
         elif signal.rsi < 50: score += 1.0
     else:
         if signal.rsi > 70: score += 3.0
         elif signal.rsi > 50: score += 1.0
-    # Hacim oranı
     if signal.volume_ratio > 3.0: score += 2.5
     elif signal.volume_ratio > 2.0: score += 2.0
     elif signal.volume_ratio > 1.5: score += 1.0
-    # MACD uyumu
     if (signal.direction == "BULLISH" and signal.macd_signal == "BULLISH") or \
        (signal.direction == "BEARISH" and signal.macd_signal == "BEARISH"):
         score += 1.5
-    # RSI-EMA trend yönü
     if (signal.direction == "BULLISH" and signal.rsi > signal.rsi_ema) or \
        (signal.direction == "BEARISH" and signal.rsi < signal.rsi_ema):
         score += 1.0
-    # Bollinger yakınlık/konum
     if signal.bb_position in ("NEAR_LOWER", "LOWER") and signal.direction == "BULLISH":
         score += 0.5
     if signal.bb_position in ("NEAR_UPPER", "UPPER") and signal.direction == "BEARISH":
         score += 0.5
-    # Fiyat filtresi
     if signal.price > 10: score += 0.5
-    # RSI trendline kırılım açısı
     if signal.breakout_angle is not None:
         angle_abs = abs(signal.breakout_angle)
         if angle_abs > 30: score += 3.0
         elif angle_abs > 15: score += 2.0
         elif angle_abs > 5: score += 1.0
-    # Mum formasyonları
     if signal.candle_formation:
         if signal.candle_formation in [
             "Hammer", "Bullish Engulfing", "Piercing Pattern", "Three White Soldiers"
@@ -405,16 +396,13 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
             score += 2.5
         elif signal.candle_formation == "Doji":
             score += 1.0
-    # Çoklu zaman dilimi katkısı
     if signal.multi_tf_score:
         score += signal.multi_tf_score
-    # **YENİ EKLEME** - Stokastik RSI puanlaması
     if signal.stochrsi_k is not None and signal.stochrsi_d is not None:
         if signal.direction == "BULLISH" and signal.stochrsi_k > signal.stochrsi_d and signal.stochrsi_k < 20:
             score += 2.0
         elif signal.direction == "BEARISH" and signal.stochrsi_k < signal.stochrsi_d and signal.stochrsi_k > 80:
             score += 2.0
-    # **YENİ EKLEME** - Hareketli Ortalama kesişim puanlaması
     if signal.ma_cross:
         if signal.direction == "BULLISH" and signal.ma_cross == "GOLDEN_CROSS":
             score += 3.0
@@ -425,7 +413,6 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
 # ----------------------- Veri Çekme & Analiz -----------------------
 
 def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """OHLCV yeniden örnekleme."""
     if df is None or df.empty:
         return df
     df = df.copy()
@@ -438,7 +425,8 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         'close': 'last',
         'volume': 'sum'
     }
-    out = df.resample(rule).agg(agg).dropna()
+    # FutureWarning'ı çözmek için 'H' -> 'h' yapıldı
+    out = df.resample(rule.replace('H', 'h')).agg(agg).dropna()
     return out
 
 def _standardize_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -481,7 +469,8 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
             raw = fetch_history(yf_symbol, base_interval, period)
             if raw is None or raw.empty: return None
             raw = _standardize_df(raw)
-            df = _resample_ohlcv(raw, '4H')
+            # 'H' -> 'h' düzeltmesi
+            df = _resample_ohlcv(raw, '4h')
         elif timeframe == '15m':
             base_interval, period = '15m', '60d'
             df = fetch_history(yf_symbol, base_interval, period)
@@ -759,22 +748,83 @@ async def send_daily_report(loop):
 """
     await send_telegram(msg)
 
+# ----------------------- Log Analiz Fonksiyonu -----------------------
+
+async def analyze_logs():
+    """Reads log file, counts different log levels, and sends a summary report."""
+    log_file = LOG_FILE
+    if not os.path.exists(log_file):
+        return
+
+    log_counts = {
+        'FutureWarning': 0,
+        'ERROR': 0,
+        'WARNING': 0,
+        'INFO': 0,
+        'TOTAL_LINES': 0
+    }
+    
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            last_1000_lines = lines[-1000:]
+            
+            for line in last_1000_lines:
+                log_counts['TOTAL_LINES'] += 1
+                if 'FutureWarning' in line:
+                    log_counts['FutureWarning'] += 1
+                if 'ERROR' in line:
+                    log_counts['ERROR'] += 1
+                if 'WARNING' in line:
+                    log_counts['WARNING'] += 1
+                if 'INFO' in line:
+                    log_counts['INFO'] += 1
+    except Exception as e:
+        logger.error(f"Error reading log file for analysis: {e}")
+        return
+
+    summary_message = f"""📊 **LOG ANALİZ RAPORU** 📊
+---
+Toplam Satır: {log_counts['TOTAL_LINES']}
+ℹ️ INFO: {log_counts['INFO']}
+⚠️ WARNING: {log_counts['WARNING']}
+❌ ERROR: {log_counts['ERROR']}
+🔔 FutureWarning: {log_counts['FutureWarning']}
+
+💡 **Öneriler:**
+- Yüksek `ERROR` sayısı, veri çekiminde veya analizde problem olduğunu gösterir. Detaylar için log dosyasını kontrol edin.
+"""
+    await send_telegram(summary_message)
+
 # ----------------------- Main -----------------------
 
 async def main():
     logger.info("🚀 Gelişmiş BIST Sinyal Botu başlatılıyor...")
     stop_event = asyncio.Event()
     health_task = asyncio.create_task(start_health_server(asyncio.get_running_loop(), stop_event))
+    
     await run_scan_async()
+    
     last_report_date = dt.datetime.now(IST_TZ).date()
+    last_log_analysis_date = dt.datetime.now(IST_TZ).date()
+    
     try:
         while True:
             now_ist = dt.datetime.now(IST_TZ)
+            
+            # Günlük rapor: her gün 18:00 IST
             if now_ist.hour == 18 and now_ist.date() != last_report_date:
                 await send_daily_report(asyncio.get_running_loop())
                 last_report_date = now_ist.date()
+                
+            # Log analizi: her gün 08:00 IST (Piyasa açılışı öncesi)
+            if now_ist.hour == 8 and now_ist.date() != last_log_analysis_date:
+                await analyze_logs()
+                last_log_analysis_date = now_ist.date()
+
             await asyncio.sleep(CHECK_EVERY_MIN * 60)
             await run_scan_async()
+            
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot durduruluyor...")
         stop_event.set()
