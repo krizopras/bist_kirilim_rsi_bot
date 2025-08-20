@@ -420,38 +420,33 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
         # Hisse senedi uzantısını (ör. .IS) yfinance için ayarla
         yf_symbol = f"{symbol}.IS"
         
-        if timeframe == '1d':
-            # investpy'yi kullanarak günlük veriyi çek
-            df = investpy.get_stock_historical_data(
-                stock=symbol,
-                country='turkey',
-                from_date=(datetime.datetime.now() - timedelta(days=730)).strftime('%d/%m/%Y'),
-                to_date=datetime.datetime.now().strftime('%d/%m/%Y'),
-                interval='Daily'
-            )
-            # Sütun isimlerini standartlaştır
-            df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
-        else:
-            # yfinance'i kullanarak gün içi veriyi çek
-            
-            # Zaman dilimlerini yfinance formatına dönüştür
-            yf_interval = ""
-            if timeframe == '4h': yf_interval = '4h'
-            elif timeframe == '1h': yf_interval = '1h'
-            elif timeframe == '15m': yf_interval = '15m'
-            
-            # Veri aralığını ayarla
-            if yf_interval == '4h': period = '180d'
-            elif yf_interval == '1h': period = '60d'
-            elif yf_interval == '15m': period = '30d'
-            else: return None
+        # Zaman dilimlerini yfinance formatına dönüştür
+        yf_interval = ""
+        period = ""
+        if timeframe == '1d': 
+            yf_interval = '1d'
+            period = '730d' # 2 yıl
+        elif timeframe == '4h': 
+            yf_interval = '4h'
+            period = '180d' # 6 ay
+        elif timeframe == '1h': 
+            yf_interval = '1h'
+            period = '60d' # 2 ay
+        elif timeframe == '15m': 
+            yf_interval = '15m'
+            period = '30d' # 1 ay
+        
+        if not yf_interval or not period: return None
 
-            stock = yf.Ticker(yf_symbol)
-            df = stock.history(interval=yf_interval, period=period)
-            
-            # Sütun isimlerini standartlaştır
-            df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
-            df = df.drop(columns=['Dividends', 'Stock Splits'])
+        stock = yf.Ticker(yf_symbol)
+        df = stock.history(interval=yf_interval, period=period)
+        
+        # Sütun isimlerini standartlaştır
+        df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
+        # Ek sütunları kaldır (varsa)
+        if 'Dividends' in df.columns: df = df.drop(columns=['Dividends'])
+        if 'Stock Splits' in df.columns: df = df.drop(columns=['Stock Splits'])
+
 
         if df is None or df.empty or len(df) < 50:
             raise RuntimeError(f"Insufficient data for {symbol} ({timeframe})")
