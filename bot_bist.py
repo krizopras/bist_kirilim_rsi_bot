@@ -24,7 +24,8 @@ import numpy as np
 import pandas as pd
 import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
-import yfinance as yf
+# import yfinance as yf # yfinance yerine investpy kullanıyoruz
+import investpy
 
 # Render.com için timezone ayarı
 os.environ['TZ'] = 'UTC'
@@ -180,7 +181,9 @@ def discover_active_stocks() -> Set[str]:
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {}
         for ticker in TICKERS:
-            future = executor.submit(check_stock_activity, ticker)
+            # .IS uzantısını kaldır, investpy'nin formatına uyum sağlamak için
+            ticker_no_suffix = ticker.replace(".IS", "")
+            future = executor.submit(check_stock_activity, ticker_no_suffix)
             futures[future] = ticker
         
         for future in as_completed(futures):
@@ -201,20 +204,23 @@ def discover_active_stocks() -> Set[str]:
     return active_stocks
 
 def check_stock_activity(ticker: str) -> Tuple[bool, Dict]:
-    """Tek bir hissenin aktif olup olmadığını kontrol et"""
+    """Tek bir hissenin aktif olup olmadığını investpy ile kontrol et"""
     try:
-        symbol = ensure_is_suffix(ticker)
-        
         # Son 5 günlük veri al
-        df = yf.download(symbol, period="5d", interval="1d", 
-                        auto_adjust=False, progress=False, timeout=REQUEST_TIMEOUT)
+        end_date = datetime.now()
+        start_date = end_date - pd.Timedelta(days=7)
+
+        df = investpy.get_stock_historical_data(
+            stock=ticker,
+            country='turkey',
+            from_date=start_date.strftime('%d/%m/%Y'),
+            to_date=end_date.strftime('%d/%m/%Y')
+        )
         
         if df is None or df.empty or len(df) < 2:
             return False, {}
         
-        # Son fiyat ve hacim bilgileri
-        df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-        df = df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"})
+        df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
         
         last_close = df["close"].iloc[-1]
         last_volume = df["volume"].iloc[-1]
@@ -440,27 +446,41 @@ def ensure_is_suffix(ticker: str) -> str:
 
 # ----------------------- Data Fetching -----------------------
 def fetch_yf_df(symbol: str, timeframe: str) -> pd.DataFrame:
-    """Yahoo Finance'dan veri çek"""
-    yf_symbol = ensure_is_suffix(symbol)
+    """investpy'den veri çek"""
+    # investpy'de .IS uzantısı kullanılmaz
+    inv_symbol = symbol.replace(".IS", "")
     
     try:
-        if timeframe in ("1h", "4h"):
-            df = yf.download(tickers=yf_symbol, interval="60m", period=YF_INTRADAY_PERIOD, 
-                           auto_adjust=False, progress=False, timeout=REQUEST_TIMEOUT)
-        elif timeframe == "1d":
-            df = yf.download(tickers=yf_symbol, interval="1d", period=YF_DAILY_PERIOD, 
-                           auto_adjust=False, progress=False, timeout=REQUEST_TIMEOUT)
-        else:
+        interval_map = {
+            "1h": "60m",
+            "4h": "240m",
+            "1d": "1d",
+        }
+        
+        if timeframe not in interval_map:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
         
+        # Sadece günlük verilerde çalışıyor
+        if timeframe == "1d":
+            df = investpy.get_stock_historical_data(
+                stock=inv_symbol,
+                country='turkey',
+                from_date=(datetime.now() - timedelta(days=730)).strftime('%d/%m/%Y'),
+                to_date=datetime.now().strftime('%d/%m/%Y')
+            )
+            df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+        else:
+            # investpy'nin intraday veri desteği sınırlı, bu nedenle bu kısım için alternatif bir çözüm gerekebilir.
+            # Şimdilik sadece günlük veriyi desteklemesi için uyarı ekliyoruz.
+            raise RuntimeError("Investpy intraday (1h, 4h) veri desteği sağlamıyor.")
+
         if df is None or df.empty:
-            raise RuntimeError(f"No data for {yf_symbol}")
+            raise RuntimeError(f"No data for {inv_symbol}")
         
-        # Sütun standardizasyonu
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+        # Timezone handling
+        if df.index.tz is not None:
+            df.index = df.index.tz_convert("UTC").tz_localize(None)
         
-        df = df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"})
         df = df.dropna(subset=["close"])
         
         if len(df) < 50:
@@ -470,24 +490,21 @@ def fetch_yf_df(symbol: str, timeframe: str) -> pd.DataFrame:
         if len(df) > MAX_DATA_POINTS:
             df = df.tail(MAX_DATA_POINTS)
         
-        # Timezone handling
-        if df.index.tz is not None:
-            df.index = df.index.tz_convert("UTC").tz_localize(None)
-        
-        # 4h resampling
+        # 4h resampling (gerektiğinde)
         if timeframe == "4h":
             o = df["open"].resample("4H", label="right", closed="right").first()
             h = df["high"].resample("4H", label="right", closed="right").max()
             l = df["low"].resample("4H", label="right", closed="right").min()
             c = df["close"].resample("4H", label="right", closed="right").last()
             v = df["volume"].resample("4H", label="right", closed="right").sum()
-            df = pd.concat([o,h,l,c,v], axis=1).dropna()
-            df.columns = ["open","high","low","close","volume"]
-        
+            df = pd.concat([o, h, l, c, v], axis=1).dropna()
+            df.columns = ["open", "high", "low", "close", "volume"]
+
         return df
         
     except Exception as e:
-        raise RuntimeError(f"Fetch error for {yf_symbol}: {e}")
+        raise RuntimeError(f"Fetch error for {inv_symbol}: {e}")
+
 
 # ----------------------- Analysis -----------------------
 def analyze_symbol_timeframe(symbol: str, timeframe: str) -> Optional[SignalInfo]:
