@@ -14,6 +14,7 @@ import logging
 import threading
 import gc
 import json
+import math
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple, Dict, Optional, Set
 from dataclasses import dataclass
@@ -161,6 +162,7 @@ class SignalInfo:
     strength_score: float
     timestamp: str
     market_cap: Optional[float] = None
+    breakout_angle: Optional[float] = None # Yeni alan
 
 @dataclass
 class StockInfo:
@@ -372,7 +374,7 @@ def find_pivots(arr: pd.Series, left: int, right: int) -> Tuple[List[int], List[
             lows.append(i)
     return highs, lows
 
-def trendline_from_pivots(idx1: int, val1: float, idx2: int, val2: float):
+def trendline_from_pivots(idx1: int, val1: float, idx2: int, val2: float) -> Tuple[float, float]:
     if idx2 == idx1:
         return 0.0, val2
     m = (val2 - val1) / (idx2 - idx1)
@@ -382,9 +384,10 @@ def trendline_from_pivots(idx1: int, val1: float, idx2: int, val2: float):
 def value_on_line(m: float, b: float, x: float) -> float:
     return m * x + b
 
-def detect_breakouts(rsi: pd.Series, highs_idx: List[int], lows_idx: List[int], now_i: int):
+def detect_breakouts(rsi: pd.Series, highs_idx: List[int], lows_idx: List[int], now_i: int) -> Tuple[bool, bool, Optional[float]]:
     bull_break = False
     bear_break = False
+    breakout_angle = None
     
     if len(highs_idx) >= 2:
         i2, i1 = highs_idx[-1], highs_idx[-2]
@@ -392,7 +395,9 @@ def detect_breakouts(rsi: pd.Series, highs_idx: List[int], lows_idx: List[int], 
         if v2 < v1:
             m, b = trendline_from_pivots(i1, v1, i2, v2)
             y_now = value_on_line(m, b, now_i)
-            bull_break = rsi.iloc[now_i] > y_now
+            if rsi.iloc[now_i] > y_now:
+                bull_break = True
+                breakout_angle = math.degrees(math.atan(m))
     
     if len(lows_idx) >= 2:
         j2, j1 = lows_idx[-1], lows_idx[-2]
@@ -400,14 +405,28 @@ def detect_breakouts(rsi: pd.Series, highs_idx: List[int], lows_idx: List[int], 
         if w2 > w1:
             m2, b2 = trendline_from_pivots(j1, w1, j2, w2)
             y_now2 = value_on_line(m2, b2, now_i)
-            bear_break = rsi.iloc[now_i] < y_now2
+            if rsi.iloc[now_i] < y_now2:
+                bear_break = True
+                breakout_angle = math.degrees(math.atan(m2))
     
-    return bull_break, bear_break
+    return bull_break, bear_break, breakout_angle
 
 def calculate_signal_strength(signal: SignalInfo) -> float:
     score = 5.0
     
-    # Hacim puanı
+    # 1. RSI Seviyesine göre puanlama
+    if signal.direction == "BULLISH":
+        if signal.rsi < 30:
+            score += 3.0
+        elif signal.rsi >= 30 and signal.rsi < 50:
+            score += 1.0
+    elif signal.direction == "BEARISH":
+        if signal.rsi > 70:
+            score += 3.0
+        elif signal.rsi <= 70 and signal.rsi > 50:
+            score += 1.0
+            
+    # 2. Hacim Puanı
     if signal.volume_ratio > 3.0:
         score += 2.5
     elif signal.volume_ratio > 2.0:
@@ -415,29 +434,40 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
     elif signal.volume_ratio > 1.5:
         score += 1.0
     
-    # MACD onayı
+    # 3. MACD Onayı
     if signal.direction == "BULLISH" and signal.macd_signal == "BULLISH":
         score += 1.5
     elif signal.direction == "BEARISH" and signal.macd_signal == "BEARISH":
         score += 1.5
     
-    # RSI-EMA onayı
+    # 4. RSI-EMA Onayı
     if signal.direction == "BULLISH" and signal.rsi > signal.rsi_ema:
         score += 1.0
     elif signal.direction == "BEARISH" and signal.rsi < signal.rsi_ema:
         score += 1.0
     
-    # Bollinger Bands pozisyonu
+    # 5. Bollinger Bands Pozisyonu
     if signal.direction == "BULLISH" and signal.bb_position == "NEAR_LOWER":
         score += 0.5
     elif signal.direction == "BEARISH" and signal.bb_position == "NEAR_UPPER":
         score += 0.5
     
-    # Fiyat seviyesi bonusu (düşük fiyatlı hisseler daha riskli)
+    # 6. Fiyat Seviyesi Bonusu
     if signal.price > 10:
         score += 0.5
     elif signal.price < 2:
         score -= 0.5
+    
+    # 7. Kırılım Açısı Puanı (YENİ)
+    if signal.breakout_angle is not None:
+        angle_abs = abs(signal.breakout_angle)
+        if angle_abs > 30:
+            score += 3.0  # Çok dik kırılım
+        elif angle_abs > 15:
+            score += 2.0  # Dik kırılım
+        elif angle_abs > 5:
+            score += 1.0  # Normal kırılım
+        # Yatay kırılımlar ekstra puan almaz
     
     return min(10.0, max(0.0, score))
 
@@ -512,7 +542,6 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str) -> Optional[SignalInfo
     try:
         df = fetch_yf_df(symbol, timeframe)
     except Exception as e:
-        # Başarısız hisseleri blacklist'e ekle
         BLACKLISTED_STOCKS.add(symbol)
         if symbol in ACTIVE_STOCKS:
             ACTIVE_STOCKS.remove(symbol)
@@ -540,35 +569,11 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str) -> Optional[SignalInfo
         highs_idx, lows_idx = find_pivots(rsi_series, PIVOT_PERIOD, PIVOT_PERIOD)
         now_i = len(rsi_series) - 1
 
-        bull_break, bear_break = detect_breakouts(rsi_series, highs_idx, lows_idx, now_i)
+        bull_break, bear_break, breakout_angle = detect_breakouts(rsi_series, highs_idx, lows_idx, now_i)
 
         current_rsi = rsi_series.iloc[now_i]
         current_rsi_ema = rsi_ema.iloc[now_i]
         current_price = close.iloc[-1]
-
-        # Gelişmiş filtreleme
-        if bull_break:
-            if current_rsi < 30:
-                bull_break = bull_break and current_rsi > current_rsi_ema
-            elif current_rsi > 70:
-                bull_break = False
-            else:
-                bull_break = bull_break and current_rsi > current_rsi_ema
-
-        if bear_break:
-            if current_rsi > 70:
-                bear_break = bear_break and current_rsi < current_rsi_ema
-            elif current_rsi < 30:
-                bear_break = False
-            else:
-                bear_break = bear_break and current_rsi < current_rsi_ema
-
-        # Hacim filtresi
-        if (bull_break or bear_break) and volume_ratio < MIN_VOLUME_RATIO:
-            bull_break = bear_break = False
-
-        if not (bull_break or bear_break):
-            return None
 
         # MACD sinyali
         macd_signal_str = "NEUTRAL"
@@ -582,6 +587,37 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str) -> Optional[SignalInfo
             elif macd_hist.iloc[-1] < macd_hist.iloc[-2]:
                 macd_signal_str = "BEARISH"
 
+        # **Ana sinyal kontrolü artık daha esnek**
+        is_bull_signal = bull_break or (macd_signal_str == "BULLISH" and current_rsi > 50)
+        is_bear_signal = bear_break or (macd_signal_str == "BEARISH" and current_rsi < 50)
+
+        if not (is_bull_signal or is_bear_signal):
+            return None
+
+        # Gelişmiş filtreleme
+        if is_bull_signal:
+            if current_rsi < 30: # Aşırı satım bölgesinden dönüş
+                pass
+            elif current_rsi > 70: # Çok yüksek RSI seviyesindeki kırılımları ele
+                is_bull_signal = False
+            
+            # Hacim filtresi
+            if volume_ratio < MIN_VOLUME_RATIO:
+                is_bull_signal = False
+        
+        if is_bear_signal:
+            if current_rsi > 70: # Aşırı alım bölgesinden dönüş
+                pass
+            elif current_rsi < 30: # Çok düşük RSI seviyesindeki kırılımları ele
+                is_bear_signal = False
+
+            # Hacim filtresi
+            if volume_ratio < MIN_VOLUME_RATIO:
+                is_bear_signal = False
+        
+        if not (is_bull_signal or is_bear_signal):
+            return None
+
         # Bollinger Bands pozisyonu
         bb_position = "MIDDLE"
         current_bb_upper = bb_upper.iloc[-1]
@@ -593,7 +629,7 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str) -> Optional[SignalInfo
         elif current_price < current_bb_lower + (bb_range * 0.1):
             bb_position = "NEAR_LOWER"
 
-        direction = "BULLISH" if bull_break else "BEARISH"
+        direction = "BULLISH" if is_bull_signal else "BEARISH"
         
         # Hacim TL cinsinden
         volume_try = current_price * current_volume
@@ -610,7 +646,8 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str) -> Optional[SignalInfo
             macd_signal=macd_signal_str,
             bb_position=bb_position,
             strength_score=0.0,
-            timestamp=df.index[-1].strftime('%Y-%m-%d %H:%M')
+            timestamp=df.index[-1].strftime('%Y-%m-%d %H:%M'),
+            breakout_angle=breakout_angle
         )
         
         signal.strength_score = calculate_signal_strength(signal)
@@ -661,6 +698,8 @@ def send_enhanced_alert(signal: SignalInfo):
     else:
         volume_str = f"{signal.volume_try:.0f} TL"
 
+    angle_str = f"({signal.breakout_angle:.1f}°)" if signal.breakout_angle is not None else ""
+    
     msg = f"""<b>{emoji} RSI TRENDLINE BREAK</b>
 
 📊 <b>Hisse:</b> {signal.symbol}.IS
@@ -675,7 +714,7 @@ def send_enhanced_alert(signal: SignalInfo):
 • BB Pozisyon: {signal.bb_position}
 
 {volume_emoji} <b>Hacim:</b> {signal.volume_ratio:.1f}x ({volume_str})
-⚡ <b>Güç:</b> {signal.strength_score:.1f}/10 {strength_stars}
+⚡ <b>Güç:</b> {signal.strength_score:.1f}/10 {strength_stars} {angle_str}
 
 🕐 <b>Zaman:</b> {signal.timestamp} UTC
 🔍 <b>Tarama:</b> {SCAN_MODE} ({len(ACTIVE_STOCKS)} hisse)
@@ -690,196 +729,80 @@ def send_enhanced_alert(signal: SignalInfo):
 
 def parallel_scan_stocks(stocks: List[str], timeframe: str) -> List[SignalInfo]:
     """Paralel hisse tarama"""
-    signals = []
     
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {}
-        for stock in stocks:
-            future = executor.submit(analyze_symbol_timeframe, stock, timeframe)
-            futures[future] = stock
-        
+    # Çok fazla işlemci kullanmamak için kısıtlama
+    num_workers = min(MAX_WORKERS, len(stocks))
+    
+    signals = []
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(analyze_symbol_timeframe, s, timeframe): s for s in stocks}
         for future in as_completed(futures):
-            stock = futures[future]
             try:
                 signal = future.result()
                 if signal:
                     signals.append(signal)
             except Exception as e:
-                logger.debug(f"Scan error {stock} {timeframe}: {e}")
+                logger.error(f"Future error for {futures[future]}: {e}")
     
     return signals
 
-def job():
-    """Ana tarama işi"""
+def run_scan():
+    """Taramayı başlatan ana fonksiyon"""
     global LAST_SCAN_TIME, ACTIVE_STOCKS
     
-    start_time = time.time()
-    logger.info(f"🔍 Tam BIST taraması başladı - {SCAN_MODE} modu")
-    
-    # Aktif hisseleri güncelle (her 4 taramada bir)
-    scan_count = getattr(job, 'count', 0)
-    job.count = scan_count + 1
-    
-    if scan_count % 4 == 0:  # Her 1 saatte bir (15dk * 4 = 60dk)
-        ACTIVE_STOCKS = discover_active_stocks()
+    logger.info("🔍 Tam BIST taraması başladı - %s modu", SCAN_MODE)
     
     if not ACTIVE_STOCKS:
-        logger.warning("❌ Aktif hisse bulunamadı, varsayılan listeyi kullanıyor")
-        ACTIVE_STOCKS = set(BIST_30_STOCKS)
-    
-    total_signals = 0
-    total_scanned = 0
-    errors = 0
-    
-    try:
-        # Her timeframe için paralel tarama
-        for timeframe in TIMEFRAMES:
-            tf_start = time.time()
-            active_list = list(ACTIVE_STOCKS)
-            
-            logger.info(f"⏰ {timeframe} taraması başladı - {len(active_list)} hisse")
-            
-            signals = parallel_scan_stocks(active_list, timeframe)
-            
-            # Sinyalleri güç skoruna göre sırala
-            signals.sort(key=lambda s: s.strength_score, reverse=True)
-            
-            # En güçlü sinyalleri gönder (spam önlemek için max 5 per timeframe)
-            for signal in signals[:5]:
-                send_enhanced_alert(signal)
-                time.sleep(1)  # Rate limiting
-                total_signals += 1
-            
-            total_scanned += len(active_list)
-            tf_duration = time.time() - tf_start
-            
-            logger.info(f"✅ {timeframe}: {len(signals)} sinyal, {tf_duration:.1f}s")
-            
-            # Memory cleanup
-            gc.collect()
-        
-        scan_duration = time.time() - start_time
+        ACTIVE_STOCKS = discover_active_stocks()
+
+    if not ACTIVE_STOCKS:
+        logger.warning("🚫 Taranacak aktif hisse bulunamadı.")
         LAST_SCAN_TIME = datetime.now(timezone.utc)
+        return
         
-        # Özet raporu
-        logger.info(f"""
-🎯 TARAMA TAMAMLANDI
-• Mod: {SCAN_MODE}
-• Taranan hisse: {len(ACTIVE_STOCKS)}
-• Toplam kontrol: {total_scanned}
-• Bulunan sinyal: {total_signals}
-• Süre: {scan_duration:.1f}s
-• Blacklist: {len(BLACKLISTED_STOCKS)}
-        """.strip())
-        
-        # Günlük özet (her 4 saatte bir)
-        if scan_count % 16 == 0:  # 4 saat
-            send_daily_summary()
-        
-    except Exception as e:
-        logger.error(f"❌ Kritik tarama hatası: {e}")
+    all_signals = []
     
-    # Memory cleanup
+    for timeframe in TIMEFRAMES:
+        logger.info(f"⏳ {timeframe} zaman dilimi taranıyor...")
+        signals = parallel_scan_stocks(list(ACTIVE_STOCKS), timeframe)
+        all_signals.extend(signals)
+        time.sleep(1) # API limitlerini aşmamak için kısa bir bekleme
+
+    if all_signals:
+        all_signals.sort(key=lambda s: s.strength_score, reverse=True)
+        for signal in all_signals:
+            send_enhanced_alert(signal)
+    else:
+        logger.info("🤷 Herhangi bir zaman diliminde sinyal bulunamadı.")
+    
+    LAST_SCAN_TIME = datetime.now(timezone.utc)
+    logger.info("✅ Tarama tamamlandı. Bir sonraki tarama %s dakika sonra.", CHECK_EVERY_MIN)
+    
     gc.collect()
 
-def send_daily_summary():
-    """Günlük özet raporu"""
-    uptime_hours = (time.time() - START_TIME) / 3600
-    
-    summary = f"""📈 <b>BIST BOT GÜNLÜK ÖZET</b>
-
-🤖 <b>Sistem Durumu:</b>
-• Mod: {SCAN_MODE}
-• Çalışma süresi: {uptime_hours:.1f} saat
-• Aktif hisse: {len(ACTIVE_STOCKS)}
-• Blacklist: {len(BLACKLISTED_STOCKS)}
-
-⏰ <b>Tarama Ayarları:</b>
-• Zaman dilimleri: {', '.join(TIMEFRAMES)}
-• Tarama aralığı: {CHECK_EVERY_MIN}dk
-• Son tarama: {LAST_SCAN_TIME.strftime('%H:%M') if LAST_SCAN_TIME else 'Henüz yok'}
-
-💪 <b>Filtreler:</b>
-• Min fiyat: ₺{MIN_PRICE}
-• Min hacim: {MIN_VOLUME_TRY/1000000:.1f}M TL
-• Min hacim oranı: {MIN_VOLUME_RATIO}x
-
-🎯 Bot aktif olarak {len(ACTIVE_STOCKS)} BIST hissesini izliyor!
-#GünlükÖzet #BIST #{SCAN_MODE}"""
-    
-    send_telegram(summary)
-
-def test_telegram():
-    """Telegram bağlantı testi"""
-    test_msg = f"""🚀 <b>FULL BIST SCANNER STARTED</b>
-
-✅ Bot başarıyla başlatıldı!
-🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC
-
-📊 <b>Tarama Konfigürasyonu:</b>
-• Mod: <b>{SCAN_MODE}</b>
-• Hedef hisse sayısı: {len(TICKERS)}
-• Zaman dilimleri: {', '.join(TIMEFRAMES)}
-• Tarama aralığı: {CHECK_EVERY_MIN} dakika
-
-🎯 <b>Filtreler:</b>
-• Fiyat aralığı: ₺{MIN_PRICE} - ₺{MAX_PRICE}
-• Min hacim: {MIN_VOLUME_TRY/1000000:.1f}M TL/gün
-• Min hacim oranı: {MIN_VOLUME_RATIO}x
-
-🔧 <b>Teknik Parametreler:</b>
-• RSI({RSI_LEN}) + EMA({RSI_EMA_LEN})
-• MACD({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL})
-• Bollinger Bands({BB_PERIOD},{BB_MULT})
-
-🚀 Tüm BIST için hazır!
-#BotStarted #BIST #{SCAN_MODE}"""
-    
-    send_telegram(test_msg)
-
 def main():
-    """Ana fonksiyon"""
     logger.info("🚀 Full BIST Scanner başlatılıyor...")
-    logger.info(f"📊 Tarama modu: {SCAN_MODE}")
-    logger.info(f"🎯 Hedef hisse sayısı: {len(TICKERS)}")
-    logger.info(f"⚙️ Max worker: {MAX_WORKERS}")
-    logger.info(f"💾 Max data points: {MAX_DATA_POINTS}")
-    logger.info(f"🌐 Health server port: {RENDER_PORT}")
-    
-    # Health server başlat
-    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    logger.info("📊 Tarama modu: %s", SCAN_MODE)
+    logger.info("🎯 Hedef hisse sayısı: %d", len(TICKERS))
+    logger.info("⚙️ Max worker: %d", MAX_WORKERS)
+    logger.info("💾 Max data points: %d", MAX_DATA_POINTS)
+    logger.info("🌐 Health server port: %d", RENDER_PORT)
+
+    health_thread = threading.Thread(target=start_health_server)
+    health_thread.daemon = True
     health_thread.start()
     
-    # Telegram test
-    try:
-        test_telegram()
-    except Exception as e:
-        logger.error(f"Telegram test failed: {e}")
+    scheduler = BlockingScheduler(timezone=timezone.utc)
+    scheduler.add_job(run_scan, 'interval', minutes=CHECK_EVERY_MIN, misfire_grace_time=300)
     
-    # İlk tarama
-    try:
-        job()
-    except Exception as e:
-        logger.error(f"İlk tarama hatası: {e}")
-    
-    # Zamanlayıcı kurulumu
-    scheduler = BlockingScheduler(timezone="UTC")
-    scheduler.add_job(
-        job, 
-        "cron", 
-        minute=f"*/{CHECK_EVERY_MIN}",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=60
-    )
+    # İlk çalıştırma
+    run_scan()
     
     try:
-        logger.info("⏰ Zamanlayıcı başlatıldı - Full BIST Scanner aktif!")
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 Bot kapatılıyor...")
-    except Exception as e:
-        logger.error(f"Zamanlayıcı hatası: {e}")
+        logger.info("Scheduler durduruluyor.")
+        pass
 
 if __name__ == "__main__":
     main()
