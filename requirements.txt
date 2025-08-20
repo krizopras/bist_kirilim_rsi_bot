@@ -3,6 +3,7 @@ pandas>=2.2.0
 numpy>=1.26.0
 requests>=2.32.0
 investpy
+yfinance>=0.2.37
 
 # Scheduler
 APScheduler>=3.10.4
