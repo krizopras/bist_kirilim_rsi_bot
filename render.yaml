@@ -39,12 +39,6 @@ services:
       - key: BB_MULT
         value: 2.0
       
-      # Data Windows
-      - key: YF_INTRADAY_PERIOD
-        value: 60d
-      - key: YF_DAILY_PERIOD
-        value: 2y
-      
       # Logging
       - key: LOG_LEVEL
         value: INFO
