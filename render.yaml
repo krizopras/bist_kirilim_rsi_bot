@@ -46,7 +46,7 @@ services:
         value: INFO
       
       # Secret variables (add these manually in Render dashboard)
-      - key: TELEGRAM_TOKEN
+      - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
