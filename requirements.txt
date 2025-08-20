@@ -1,9 +1,8 @@
 # Core dependencies
-pandas>=2.2.0
-numpy>=1.26.0
-requests>=2.32.0
-investpy
+investpy>=1.0.8
 yfinance>=0.2.37
+pandas>=2.2.2
+numpy>=1.26.0
 
 # Scheduler
 APScheduler>=3.10.4
