@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 import investpy
 import math
+import yfinance as yf # yfinance kütüphanesi eklendi
 
 # --- Ayarlar ve Güvenlik ---
 LOG_FILE = os.getenv('LOG_FILE', 'trading_bot.log')
@@ -416,40 +417,46 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
 # ----------------------- Data Fetching & Analysis -----------------------
 def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
     try:
-        end_date = datetime.datetime.now()
+        # Hisse senedi uzantısını (ör. .IS) yfinance için ayarla
+        yf_symbol = f"{symbol}.IS"
         
-        # investpy'nin desteklediği aralıkları kullanıyoruz
         if timeframe == '1d':
-            start_date = end_date - timedelta(days=730)
-            interval = 'Daily'
-        elif timeframe == '4h':
-            start_date = end_date - timedelta(days=180)
-            interval = '4h'
-        elif timeframe == '1h':
-            start_date = end_date - timedelta(days=60)
-            interval = '1h'
-        elif timeframe == '15m':
-            start_date = end_date - timedelta(days=30)
-            interval = '15m'
+            # investpy'yi kullanarak günlük veriyi çek
+            df = investpy.get_stock_historical_data(
+                stock=symbol,
+                country='turkey',
+                from_date=(datetime.datetime.now() - timedelta(days=730)).strftime('%d/%m/%Y'),
+                to_date=datetime.datetime.now().strftime('%d/%m/%Y'),
+                interval='Daily'
+            )
+            # Sütun isimlerini standartlaştır
+            df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
         else:
-            return None
-        
-        # investpy'de .IS uzantısı kullanılmaz
-        inv_symbol = symbol.replace(".IS", "")
+            # yfinance'i kullanarak gün içi veriyi çek
+            
+            # Zaman dilimlerini yfinance formatına dönüştür
+            yf_interval = ""
+            if timeframe == '4h': yf_interval = '4h'
+            elif timeframe == '1h': yf_interval = '1h'
+            elif timeframe == '15m': yf_interval = '15m'
+            
+            # Veri aralığını ayarla
+            if yf_interval == '4h': period = '180d'
+            elif yf_interval == '1h': period = '60d'
+            elif yf_interval == '15m': period = '30d'
+            else: return None
 
-        df = investpy.get_stock_historical_data(
-            stock=inv_symbol,
-            country='turkey',
-            from_date=start_date.strftime('%d/%m/%Y'),
-            to_date=end_date.strftime('%d/%m/%Y'),
-            interval=interval
-        )
-        
+            stock = yf.Ticker(yf_symbol)
+            df = stock.history(interval=yf_interval, period=period)
+            
+            # Sütun isimlerini standartlaştır
+            df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
+            df = df.drop(columns=['Dividends', 'Stock Splits'])
+
         if df is None or df.empty or len(df) < 50:
             raise RuntimeError(f"Insufficient data for {symbol} ({timeframe})")
         
-        df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
-        df = df.dropna(subset=["close"]).tail(300)
+        df = df.dropna().tail(300)
 
         close, volume = df["close"], df["volume"]
         rsi_series = rsi_from_close(close, RSI_LEN)
