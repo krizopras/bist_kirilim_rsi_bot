@@ -1,5 +1,14 @@
+# Core dependencies
 pandas>=2.2.0
 numpy>=1.26.0
-APScheduler>=3.10.4
 requests>=2.32.0
 yfinance>=0.2.50
+
+# Scheduler
+APScheduler>=3.10.4
+
+# Timezone support
+pytz>=2023.3
+
+# Optional: Memory monitoring (will be ignored if not available)
+psutil>=5.9.0
