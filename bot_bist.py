@@ -546,20 +546,22 @@ async def run_scan_async():
 
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {loop.run_in_executor(executor, fetch_and_analyze_data, symbol, timeframe): (symbol, timeframe)
-                   for symbol in TICKERS for timeframe in TIMEFRAMES}
+        tasks = [loop.run_in_executor(executor, fetch_and_analyze_data, symbol, timeframe)
+                 for symbol in TICKERS for timeframe in TIMEFRAMES]
         
-        for future in asyncio.as_completed(futures):
-            symbol, timeframe = futures[future]
-            try:
-                result = await future
-                if result:
-                    if symbol not in multi_tf_signals:
-                        multi_tf_signals[symbol] = []
-                    multi_tf_signals[symbol].append(result)
-            except Exception as e:
-                logger.error(f"Tarama görevi başarısız: {symbol} - {e}")
-    
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                # Hata zaten fetch_and_analyze_data içinde loglandığı için burada tekrar loglamaya gerek yok
+                continue
+            
+            if result:
+                symbol = result.symbol
+                if symbol not in multi_tf_signals:
+                    multi_tf_signals[symbol] = []
+                multi_tf_signals[symbol].append(result)
+
     all_final_signals = []
     
     for symbol, signals in multi_tf_signals.items():
