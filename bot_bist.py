@@ -24,7 +24,7 @@ def get_start_date(days_back=30):
     return get_end_date() - timedelta(days=days_back)
 
 def fetch_data_yfinance(symbol, start, end, interval):
-    df = yf.download(symbol, start=start, end=end, interval=interval)
+   df = yf.download(symbol, start=start, end=end, interval=interval, auto_adjust=False)
     if not df.empty:
         df.dropna(inplace=True)
     return df
