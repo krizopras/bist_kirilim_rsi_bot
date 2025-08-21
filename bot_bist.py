@@ -7,6 +7,7 @@ TÜM BIST Hisselerini Paralel Tarayan Çoklu Zaman Dilimi ve Mum Formasyonu Anal
 - Günde aynı hisse için aynı yönde sadece 1 sinyal gönderir
 - Gün sonu 18:30'da detaylı performans raporu sunar
 - TÜM BIST hisselerini tarar (500+ hisse)
+- Sinyal filtreleme ve puanlama mantığı geliştirildi.
 """
 
 import os
@@ -146,11 +147,11 @@ else:
 CHECK_EVERY_MIN = int(os.getenv("CHECK_EVERY_MIN", "15"))
 TIMEFRAMES = [t.strip() for t in os.getenv("TIMEFRAMES", "").split(',') if t.strip()] or ["1d", "4h", "1h", "15m"]
 MIN_PRICE = float(os.getenv("MIN_PRICE", "1.0"))
-MIN_VOLUME_TRY = float(os.getenv("MIN_VOLUME_TRY", "1000000"))
+MIN_VOLUME_TRY = float(os.getenv("MIN_VOLUME_TRY", "5000000")) # DEĞİŞTİ!
+MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "2.0")) # DEĞİŞTİ!
 RSI_LEN = int(os.getenv("RSI_LEN", "22"))
 RSI_EMA_LEN = int(os.getenv("RSI_EMA", "66"))
 PIVOT_PERIOD = int(os.getenv("PIVOT_PERIOD", "10"))
-MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "1.5"))
 MACD_FAST = int(os.getenv("MACD_FAST", "12"))
 MACD_SLOW = int(os.getenv("MACD_SLOW", "26"))
 MACD_SIGNAL = int(os.getenv("MACD_SIGNAL", "9"))
@@ -162,7 +163,7 @@ STOCHRSI_K = int(os.getenv("STOCHRSI_K", "3"))
 STOCHRSI_D = int(os.getenv("STOCHRSI_D", "3"))
 MA_SHORT = int(os.getenv("MA_SHORT", "50"))
 MA_LONG = int(os.getenv("MA_LONG", "200"))
-MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "8.0"))
+MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "9.0")) # DEĞİŞTİ!
 
 LAST_SCAN_TIME: Optional[dt.datetime] = None
 START_TIME = time.time()
@@ -434,54 +435,78 @@ def detect_candle_formation(df: pd.DataFrame) -> Optional[str]:
 
 def calculate_signal_strength(signal: SignalInfo) -> float:
     score = 5.0
+    
+    # RSI puanlaması
     if signal.direction == "BULLISH":
         if signal.rsi < 30: score += 3.0
         elif signal.rsi < 50: score += 1.0
     else:
         if signal.rsi > 70: score += 3.0
         elif signal.rsi > 50: score += 1.0
-    if signal.volume_ratio > 3.0: score += 2.5
+        
+    # Hacim puanlaması (Ağırlık Artırıldı)
+    if signal.volume_ratio > 4.0: score += 4.0 # Çok yüksek hacim
+    elif signal.volume_ratio > 3.0: score += 3.0
     elif signal.volume_ratio > 2.0: score += 2.0
     elif signal.volume_ratio > 1.5: score += 1.0
+    
+    # MACD ve RSI Uyumu (Ağırlık Artırıldı)
     if (signal.direction == "BULLISH" and signal.macd_signal == "BULLISH") or \
        (signal.direction == "BEARISH" and signal.macd_signal == "BEARISH"):
-        score += 1.5
+        score += 2.5
+        
+    # RSI EMA puanlaması
     if (signal.direction == "BULLISH" and signal.rsi > signal.rsi_ema) or \
        (signal.direction == "BEARISH" and signal.rsi < signal.rsi_ema):
         score += 1.0
+        
+    # Bollinger Bandı pozisyonu
     if signal.bb_position in ("NEAR_LOWER", "LOWER") and signal.direction == "BULLISH":
         score += 0.5
     if signal.bb_position in ("NEAR_UPPER", "UPPER") and signal.direction == "BEARISH":
         score += 0.5
+        
+    # Fiyat puanlaması
     if signal.price > 10: score += 0.5
+    
+    # Kırılım açısı puanlaması
     if signal.breakout_angle is not None:
         angle_abs = abs(signal.breakout_angle)
         if angle_abs > 30: score += 3.0
         elif angle_abs > 15: score += 2.0
         elif angle_abs > 5: score += 1.0
+        
+    # Mum formasyonu puanlaması (Ağırlık Artırıldı)
     if signal.candle_formation:
         if signal.candle_formation in [
-            "Hammer", "Bullish Engulfing", "Piercing Pattern", "Three White Soldiers"
+            "Bullish Engulfing", "Piercing Pattern", "Three White Soldiers"
         ]:
-            score += 2.5
+            score += 3.0
         elif signal.candle_formation in [
-            "Inverted Hammer", "Bearish Engulfing", "Dark Cloud Cover", "Three Black Crows"
+            "Hammer", "Inverted Hammer"
         ]:
-            score += 2.5
+            score += 2.0
+        elif signal.candle_formation in [
+            "Bearish Engulfing", "Dark Cloud Cover", "Three Black Crows"
+        ]:
+            score += 3.0
         elif signal.candle_formation == "Doji":
             score += 1.0
-    if signal.multi_tf_score:
-        score += signal.multi_tf_score
+            
+    # StochRSI puanlaması (Ağırlık Artırıldı)
     if signal.stochrsi_k is not None and signal.stochrsi_d is not None:
         if signal.direction == "BULLISH" and signal.stochrsi_k > signal.stochrsi_d and signal.stochrsi_k < 20:
             score += 2.0
         elif signal.direction == "BEARISH" and signal.stochrsi_k < signal.stochrsi_d and signal.stochrsi_k > 80:
             score += 2.0
+            
+    # Hareketli Ortalama Kesişimi (Ağırlık Artırıldı)
     if signal.ma_cross:
         if signal.direction == "BULLISH" and signal.ma_cross == "GOLDEN_CROSS":
-            score += 3.0
+            score += 4.0
         elif signal.direction == "BEARISH" and signal.ma_cross == "DEATH_CROSS":
-            score += 3.0
+            score += 4.0
+            
     return float(max(0.0, min(10.0, score)))
 
 # --- Veri Çekme & Analiz ---
@@ -556,6 +581,8 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
 
         last_close = float(df['close'].iloc[-1])
         last_vol = float(df['volume'].iloc[-1])
+        
+        # SIKI FİLTRELER: Fiyat ve hacim kontrolü
         if last_close < MIN_PRICE or last_close * last_vol < MIN_VOLUME_TRY:
             return None
 
@@ -582,8 +609,9 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
             if macd_hist.iloc[-1] > 0 and macd_hist.iloc[-2] <= 0: macd_signal_str = "BULLISH"
             elif macd_hist.iloc[-1] < 0 and macd_hist.iloc[-2] >= 0: macd_signal_str = "BEARISH"
 
-        is_bull_signal = bull_break or (macd_signal_str == "BULLISH" and current_rsi > 50)
-        is_bear_signal = bear_break or (macd_signal_str == "BEARISH" and current_rsi < 50)
+        is_bull_signal = bull_break or (macd_signal_str == "BULLISH" and current_rsi < 50)
+        is_bear_signal = bear_break or (macd_signal_str == "BEARISH" and current_rsi > 50)
+
         if not (is_bull_signal or is_bear_signal): return None
         if volume_ratio < MIN_VOLUME_RATIO: return None
 
@@ -609,6 +637,25 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
             multi_tf_score=0.0, stochrsi_k=stochrsi_k, stochrsi_d=stochrsi_d, ma_cross=ma_cross_type
         )
         base_signal.strength_score = calculate_signal_strength(base_signal)
+        
+        # YENİ EKLENEN SIKI FİLTRELER
+        # 1. Mum formasyonu yoksa ve puanı düşükse ele
+        if not base_signal.candle_formation and base_signal.strength_score < 7.5:
+            return None
+        
+        # 2. Ana trendin tersine ve gücü zayıfsa ele
+        if (base_signal.direction == "BULLISH" and base_signal.ma_cross == "DEATH_CROSS" and base_signal.strength_score < 8.0) or \
+           (base_signal.direction == "BEARISH" and base_signal.ma_cross == "GOLDEN_CROSS" and base_signal.strength_score < 8.0):
+            return None
+        
+        # 3. MACD veya RSI kırılımı sinyali yoksa hemen ele
+        if base_signal.macd_signal == "NEUTRAL" and base_signal.breakout_angle is None:
+             return None
+             
+        # 4. Fiyat konsolidasyon bölgesindeyken sinyalleri ele
+        if base_signal.rsi > 40 and base_signal.rsi < 60 and base_signal.strength_score < 8.5:
+            return None
+            
         return base_signal
     except Exception as e:
         logger.error(f"Analysis error {symbol} {timeframe}: {e}")
@@ -748,93 +795,69 @@ async def run_scan_async():
     
     if not is_market_hours():
         now_ist = dt.datetime.now(IST_TZ)
-        logger.info(f"⏰ Borsa kapalı ({now_ist.strftime('%H:%M')} IST) - Tarama atlanıyor")
+        if now_ist.time() >= dt.time(DAILY_REPORT_HOUR, DAILY_REPORT_MINUTE) and now_ist.weekday() < 5:
+            await send_daily_report()
+            # Rapor gönderildikten sonra günlük sinyalleri temizle
+            clear_old_signals()
+        logger.info("Piyasa kapalı. Tarama yapılmıyor.")
         return
 
-    logger.info(f"🔍 Tarama başladı - {len(TICKERS)} hisse")
+    logger.info("Tarama başlıyor...")
+    tasks = []
     
+    # Paralel işlem için ThreadPoolExecutor kullanıyoruz
+    with ThreadPoolExecutor(max_workers=os.cpu_count() * 2) as executor:
+        loop = asyncio.get_running_loop()
+        futures = {
+            loop.run_in_executor(executor, fetch_and_analyze_data, symbol, tf)
+            for symbol in TICKERS
+            for tf in TIMEFRAMES
+        }
+
+        found_signals: List[SignalInfo] = []
+        for future in asyncio.as_completed(futures):
+            signal = await future
+            if signal and signal.strength_score >= MIN_SIGNAL_SCORE:
+                found_signals.append(signal)
+
+    if found_signals:
+        for signal in found_signals:
+            await send_enhanced_alert(signal)
+    else:
+        logger.info("Bu taramada sinyal bulunamadı.")
+        
+    LAST_SCAN_TIME = dt.datetime.now(IST_TZ)
+
+async def periodic_scan_loop():
+    while True:
+        try:
+            await run_scan_async()
+            await asyncio.sleep(CHECK_EVERY_MIN * 60)
+        except asyncio.CancelledError:
+            logger.info("Tarama döngüsü sonlandırıldı.")
+            break
+        except Exception as e:
+            logger.error(f"Hata: {e}")
+            await asyncio.sleep(60)
+
+async def main():
+    logger.info("Bot başlatılıyor...")
+    load_daily_signals_from_disk()
     clear_old_signals()
     
-    loop = asyncio.get_running_loop()
-    signals_by_symbol: Dict[str, List[SignalInfo]] = {}
-
-    with ThreadPoolExecutor(max_workers=min(30, len(TICKERS) * len(TIMEFRAMES))) as executor:
-        tasks = [loop.run_in_executor(executor, fetch_and_analyze_data, symbol, tf)
-                 for symbol in TICKERS for tf in TIMEFRAMES]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for result in results:
-        if isinstance(result, SignalInfo):
-            symbol = result.symbol
-            if symbol not in signals_by_symbol:
-                signals_by_symbol[symbol] = []
-            signals_by_symbol[symbol].append(result)
-        elif isinstance(result, Exception):
-            logger.error(f"Paralel tarama sırasında hata oluştu: {result}")
-
-    for symbol, signals in signals_by_symbol.items():
-        if signals:
-            bullish_count = len([s for s in signals if s.direction == "BULLISH"])
-            bearish_count = len([s for s in signals if s.direction == "BEARISH"])
-            total_count = bullish_count + bearish_count
-            
-            if total_count > 1:
-                multi_tf_score = 0
-                if bullish_count > 0 and bearish_count == 0:
-                    multi_tf_score = 1.0
-                elif bearish_count > 0 and bullish_count == 0:
-                    multi_tf_score = 1.0
-                else:
-                    multi_tf_score = abs(bullish_count - bearish_count) / total_count
-                
-                for s in signals:
-                    s.multi_tf_score = multi_tf_score
-
-            for s in signals:
-                if s.strength_score >= MIN_SIGNAL_SCORE:
-                    await send_enhanced_alert(s)
-    
-    LAST_SCAN_TIME = dt.datetime.now(IST_TZ)
-    logger.info(f"✅ Tarama tamamlandı. Son tarama: {LAST_SCAN_TIME.strftime('%H:%M:%S')}")
-
-# --- Botun Ana Döngüsü ---
-async def main_loop():
-    """Botun ana çalışma döngüsü."""
-    load_daily_signals_from_disk()
-    report_sent_today = False
-    
-    while True:
-        now_ist = dt.datetime.now(IST_TZ)
-        
-        if now_ist.time() >= dt.time(DAILY_REPORT_HOUR, DAILY_REPORT_MINUTE) and not report_sent_today:
-            if is_market_hours(): # Raporu sadece borsa kapanışında gönder
-                await send_daily_report()
-                report_sent_today = True
-
-        if now_ist.time() < dt.time(MARKET_OPEN_HOUR, 0):
-            report_sent_today = False
-            
-        if is_market_hours():
-            await run_scan_async()
-            logger.info(f"⏳ Bir sonraki tarama için bekleniyor... {CHECK_EVERY_MIN} dakika")
-            await asyncio.sleep(CHECK_EVERY_MIN * 60)
-        else:
-            logger.info("😴 Borsa kapalı, uyku modunda bekleniyor...")
-            await asyncio.sleep(600)
-
-# --- Web Sunucusu ve Başlatma ---
-if __name__ == "__main__":
     app = web.Application()
     app.router.add_get('/health', HealthHandler)
+    runner = web.AppRunner(app)
     
-    async def start_background_tasks(app):
-        app['main_loop_task'] = asyncio.create_task(main_loop())
-    
-    async def cleanup_background_tasks(app):
-        app['main_loop_task'].cancel()
-        await app['main_loop_task']
+    try:
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', HEALTH_CHECK_PORT)
+        await site.start()
+        logger.info(f"Sağlık kontrolü portu açıldı: {HEALTH_CHECK_PORT}")
+        
+        await periodic_scan_loop()
+    finally:
+        await runner.cleanup()
 
-    app.on_startup.append(start_background_tasks)
-    app.on_cleanup.append(cleanup_background_tasks)
-
-    web.run_app(app, host='0.0.0.0', port=HEALTH_CHECK_PORT)
+if __name__ == "__main__":
+    asyncio.run(main())
