@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Tüm BIST Hisselerini Paralel Tarayan Çoklu Zaman Dilimi ve Mum Formasyonu Analiz Botu
-- Asenkron yapı ile hızlı tarama.
-- yfinance üzerinden veri çeker.
-- Çoklu zaman diliminde (15m, 1h, 4h, 1d) sinyal uyumunu inceler.
-- 4H verisi Yahoo'da yerel desteklenmediği için 1H veriden 4H'ye yeniden örnekleme (resample) yapılır.
-- RSI trendline kırılımı, hacim, Bollinger, MACD, genişletilmiş mum formasyonları,
-  Stokastik RSI ve Hareketli Ortalama Kesişimleri puanlamaya dahil edilir.
-- Çoklu zaman dilimi puanı her zaman dilimi için ayrı skor hesaplanarak ağırlıklı ortalamaya katılır.
-- Bollinger "NEAR_UPPER/NEAR_LOWER" mantığı eklendi.
-- Minimum fiyat ve TL hacmi filtreleri etkinleştirildi.
-- Sinyal tekrarını disk tabanlı cooldown ile engeller, günlük rapor Istanbul saatine göre 18:00'de gönderilir.
-- Ek olarak, botun genel durumunu ve loglarını özetleyen bir analiz raporu günlük olarak gönderilir.
+TÜM BIST Hisselerini Paralel Tarayan Çoklu Zaman Dilimi ve Mum Formasyonu Analiz Botu
+- Borsa saatleri: 09:00-18:30 (İstanbul Saati) arası çalışır
+- 15 dakikada bir tarama yapar
+- Günde aynı hisse için aynı yönde sadece 1 sinyal gönderir  
+- Gün sonu 18:30'da detaylı performans raporu sunar
+- TÜM BIST hisselerini tarar (500+ hisse)
 """
 
 import os
@@ -53,29 +47,99 @@ logger.setLevel(logging.INFO)
 
 IST_TZ = dt.timezone(dt.timedelta(hours=3))
 
-# ----------------------- BIST Hisse Listeleri (kısaltıldı/temizlendi) -----------------------
-BIST_30_STOCKS = [
+# ----------------------- BORSA SAATLERİ -----------------------
+MARKET_OPEN_HOUR = 9  # 09:00
+MARKET_CLOSE_HOUR = 18  # 18:00
+MARKET_CLOSE_MINUTE = 30  # 18:30
+DAILY_REPORT_HOUR = 18  # 18:30'da günlük rapor
+DAILY_REPORT_MINUTE = 30
+
+def is_market_hours() -> bool:
+    """Borsa çalışma saatleri kontrolü: 09:00-18:30 İstanbul saati"""
+    now_ist = dt.datetime.now(IST_TZ)
+    current_time = now_ist.time()
+    
+    # Pazartesi-Cuma (0-4), hafta sonu değil
+    if now_ist.weekday() >= 5:  # Cumartesi=5, Pazar=6
+        return False
+    
+    # 09:00-18:30 arası
+    market_open = dt.time(MARKET_OPEN_HOUR, 0)
+    market_close = dt.time(MARKET_CLOSE_HOUR, MARKET_CLOSE_MINUTE)
+    
+    return market_open <= current_time <= market_close
+
+# ----------------------- TÜM BIST Hisse Listeleri -----------------------
+ALL_BIST_STOCKS = [
+    # BIST 30
     "THYAO","SAHOL","ASTOR","AKBNK","SISE","BIMAS","EREGL","KCHOL","PETKM","VAKBN",
     "TCELL","TUPRS","TTKOM","PGSUS","DOHOL","KOZAA","MGROS","ARCLK","VESTL","KRDMD",
-    "FROTO","HALKB","ISCTR","GARAN","AKSA","ALARK","AYGAZ","CCOLA","EKGYO","GUBRF"
+    "FROTO","HALKB","ISCTR","GARAN","AKSA","ALARK","AYGAZ","CCOLA","EKGYO","GUBRF",
+    
+    # BIST 50 ve diğer büyük şirketler
+    "SODA","TOASO","OTKAR","ULKER","TKFEN","ENKAI","IZMDC","KARSN","KONTR","LOGO",
+    "MAVI","NETAS","ODAS","PAPIL","PENGN","POLHO","PRKAB","REEDR","SELEC","SKBNK",
+    "SOKM","TAVHL","TBORG","TCELL","TEZOL","TMSN","TRILC","YKBNK","ZOREN","ADEL",
+    
+    # Diğer BIST 100 hisseleri
+    "AEFES","AFYON","AGESA","AGHOL","AGROT","AHGAZ","AHRTM","AKENR","AKFGY","AKFYE",
+    "AKGRT","AKSEN","AKSGY","AKSUE","ALBRK","ALCAR","ALCTL","ALFAS","ALGYO","ALKA",
+    "ALMAD","ALTIN","ALYAG","ANACM","ANELE","ANHYT","ANSGR","ARASE","ARSAN","ARZUM",
+    "ASELS","ASUZU","ATAGY","ATAKP","ATATP","ATEKS","ATLAS","ATSYH","AVGYO","AVHOL",
+    "AVISA","AVTUR","AYCES","AYEN","BAGFS","BAHKM","BAKAB","BALAT","BANVT","BASCM",
+    "BASGZ","BATI","BAYRK","BEGYO","BFREN","BIGCH","BIMAS","BINBN","BIOEN","BIZIM",
+    "BJKAS","BLCYT","BMSCH","BMSTL","BNTAS","BOBET","BOSSA","BRISA","BRKSN","BRKVY",
+    "BRYAT","BSOKE","BTCIM","BUCIM","BURCE","BURVA","CANTE","CASA","CATES","CCOLA",
+    "CELHA","CEMTS","CEOEM","CER","CIMSA","CLEBI","CMBTN","CMENT","CML","CONSE",
+    "COSMO","CRDFA","CRFSA","CWENE","DAGI","DAGHL","DARDL","DENGE","DERHL","DERIM",
+    "DESPC","DEVA","DGATE","DGGYO","DGNMO","DIRIT","DOBUR","DOCO","DOGUB","DOHOL",
+    "DOKTA","DURDO","DYOBY","DZGYO","ECILC","EDATA","EDIP","EFORC","EGPRO","EIMVT",
+    "EKGYO","EKOS","EKSUN","ELITE","EMKEL","EMNIS","ENERY","ENJSA","ENKAI","EPLAS",
+    "ERBOS","ERCB","EREGL","ERSU","ESCAR","ESCOM","ESEN","ETILR","ETYAT","EUHOL",
+    "EUKYO","EUREN","EUYO","EYGYO","FADE","FENER","FLAP","FMIZP","FONET","FORMT",
+    "FORTE","FRIGO","FROTO","FZLGY","GARAN","GARFA","GEDIK","GEDZA","GENEL","GENTS",
+    "GEREL","GESAN","GIPTA","GLBMD","GLCVY","GLRYH","GLYHO","GMTAS","GOKNR","GOLTS",
+    "GOODY","GOZDE","GRNYO","GRSEL","GRTRK","GSDDE","GSDHO","GSRAY","GUBRF","GWIND",
+    "GZNMI","HALKB","HATSN","HDFGS","HEDEF","HEKTS","HKTM","HLGYO","HTTBT","HURGZ",
+    "HUNER","HZNP","ICBCT","ICUGS","IDEAS","IDGYO","IEYHO","IHAAS","IHLAS","IHYAY",
+    "IMASM","INDES","INFO","INTEM","INVEO","IPEKE","ISATR","ISBIR","ISBTR","ISCTR",
+    "ISKUR","ISMEN","ISS","ISYAT","IZENR","IZFAS","IZGYO","IZINV","IZMDC","JANTS",
+    "KAPLM","KAPOL","KARSN","KARTN","KATMR","KAYSE","KCAER","KCHOL","KENT","KERVT",
+    "KFEIN","KGYO","KIMMR","KLMSN","KLRHO","KLSER","KLSYN","KMPUR","KNFRT","KONKA",
+    "KONTR","KONYA","KOPOL","KORDS","KOZAA","KOZAL","KRDMA","KRDMB","KRDMD","KRPLS",
+    "KRSTL","KRTEK","KRVGD","KSTUR","KUTPO","KUVVA","KUYAS","KZBGY","LIDER","LIDFA",
+    "LINK","LKMNH","LMKDC","LOGO","LUKSK","LYDHO","MAALT","MACKO","MAGEN","MAKIM",
+    "MAKTK","MARBL","MARKA","MARTI","MAVI","MEDTR","MEGAP","MEPET","MERCN","MERIT",
+    "METRO","MGROS","MHRGY","MIATK","MIGRS","MKPOL","MNDRS","MOBTL","MODERN","MPARK",
+    "MRGYO","MRSHL","MSGYO","MTRKS","MTRYO","MZHLD","NATEN","NETAS","NIBAS","NTGAZ",
+    "NTHOL","NUGYO","NUHCM","OBAMS","OBASE","ODAS","ODINE","OKANT","OLMIP","ONCSM",
+    "ORCAY","ORGE","ORHB","OSTIM","OTKAR","OTTO","OYAKC","OYAYO","OYLUM","OZBAL",
+    "OZEN","OZGYO","OZKGY","OZRDN","OZSUB","PAGEN","PAMEL","PAPIL","PARSN","PASEU",
+    "PATEK","PCILT","PENGN","PENTA","PETKM","PETUN","PGSUS","PINSU","PKART","PKENT",
+    "PLTUR","PNSUT","POLHO","POLTK","PRTAS","PRZMA","PSDTC","PTOFS","QNBFB","QNBFL",
+    "QUAGR","RADIŞ","RALYH","RAYSG","REEDR","RGYAS","RODRG","ROYAL","RTALB","RUBNS",
+    "RYSAS","SAFKR","SAHOL","SAMAT","SANEL","SANFM","SANKO","SARKY","SASA","SAYAS",
+    "SDTTR","SEKFK","SELEC","SELGD","SELVA","SEYKM","SILVR","SISE","SKBNK","SKPLC",
+    "SKYMD","SMART","SMRTG","SNGYO","SNKRN","SNPAM","SODSN","SOKM","SONME","SRVGY",
+    "SUMAS","SUNTK","SUWEN","TABGD","TARKM","TATGD","TAVHL","TBORG","TCELL","TDGYO",
+    "TEKTU","TEMP","TETMT","TEZOL","THYAO","TIRE","TKFEN","TKNSA","TLMAN","TMPOL",
+    "TMSN","TNZTP","TOASO","TSGYO","TSKB","TTKOM","TTRAK","TUCLK","TUKAS","TUPRS",
+    "TUREX","TURSG","UFUK","ULAS","ULUSE","ULUUN","UNLU","UNYEC","USAK","UZERB",
+    "VAKBN","VAKFN","VANGD","VBTYZ","VERUS","VESBE","VESTL","VGYO","VKGYO","VKING",
+    "VRGYO","YAPRK","YATAS","YAYLA","YBTAS","YEOTK","YESIL","YGGYO","YGYO","YIGIT",
+    "YKBNK","YUNSA","YYLGD","ZEDUR","ZOREN","ZRGYO"
 ]
 
-ALL_BIST_STOCKS = list(set(BIST_30_STOCKS))
+TICKERS = sorted(list(set(ALL_BIST_STOCKS)))
 
 # ----------------------- Config -----------------------
-def getenv_list(key: str, default: str) -> list:
-    return [s.strip() for s in os.getenv(key, default).split(",") if s.strip()]
-
-SCAN_MODE = os.getenv("SCAN_MODE", "BIST_30")
-CUSTOM_TICKERS = getenv_list("TICKERS", "")
-TIMEFRAMES = getenv_list("TIMEFRAMES", "1d,4h,1h,15m")
-CHECK_EVERY_MIN = int(os.getenv("CHECK_EVERY_MIN", "15"))
+CHECK_EVERY_MIN = 15  # Sabit 15 dakika
+TIMEFRAMES = ["1d", "4h", "1h", "15m"]
 MIN_PRICE = float(os.getenv("MIN_PRICE", "1.0"))
 MIN_VOLUME_TRY = float(os.getenv("MIN_VOLUME_TRY", "1000000"))
 RSI_LEN = int(os.getenv("RSI_LEN", "22"))
 RSI_EMA_LEN = int(os.getenv("RSI_EMA", "66"))
 PIVOT_PERIOD = int(os.getenv("PIVOT_PERIOD", "10"))
-ALERT_COOLDOWN_MIN = int(os.getenv("ALERT_COOLDOWN_MIN", "60"))
 MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "1.5"))
 MACD_FAST = int(os.getenv("MACD_FAST", "12"))
 MACD_SLOW = int(os.getenv("MACD_SLOW", "26"))
@@ -83,28 +147,16 @@ MACD_SIGNAL = int(os.getenv("MACD_SIGNAL", "9"))
 BB_PERIOD = int(os.getenv("BB_PERIOD", "20"))
 BB_MULT = float(os.getenv("BB_MULT", "2.0"))
 BB_NEAR_PCT = float(os.getenv("BB_NEAR_PCT", "0.03"))
-# Yeni indikatör ayarları
 STOCHRSI_PERIOD = int(os.getenv("STOCHRSI_PERIOD", "14"))
 STOCHRSI_K = int(os.getenv("STOCHRSI_K", "3"))
 STOCHRSI_D = int(os.getenv("STOCHRSI_D", "3"))
 MA_SHORT = int(os.getenv("MA_SHORT", "50"))
 MA_LONG = int(os.getenv("MA_LONG", "200"))
 
-
-if SCAN_MODE == "BIST_30":
-    TICKERS = BIST_30_STOCKS
-elif SCAN_MODE == "ALL":
-    TICKERS = ALL_BIST_STOCKS
-elif SCAN_MODE == "CUSTOM" and CUSTOM_TICKERS:
-    TICKERS = CUSTOM_TICKERS
-else:
-    TICKERS = BIST_30_STOCKS
-
-TICKERS = sorted(list(set(TICKERS)))
-
 # Global variables
 LAST_SCAN_TIME: Optional[dt.datetime] = None
 START_TIME = time.time()
+DAILY_SIGNALS: Dict[str, Dict] = {}  # Günlük sinyaller: {"THYAO_BULLISH": {...}}
 
 @dataclass
 class SignalInfo:
@@ -130,14 +182,17 @@ class SignalInfo:
 # ----------------------- Sağlık Kontrolü -----------------------
 class HealthHandler(web.View):
     async def get(self):
+        market_status = "AÇIK" if is_market_hours() else "KAPALI"
         response = {
             "status": "healthy",
             "service": "bist-scanner",
-            "mode": SCAN_MODE,
+            "market_status": market_status,
             "total_stocks_to_scan": len(TICKERS),
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "ist_time": dt.datetime.now(IST_TZ).strftime("%Y-%m-%d %H:%M:%S"),
             "uptime_seconds": time.time() - START_TIME,
-            "last_scan": LAST_SCAN_TIME.isoformat() if LAST_SCAN_TIME else None
+            "last_scan": LAST_SCAN_TIME.isoformat() if LAST_SCAN_TIME else None,
+            "daily_signals_count": len(DAILY_SIGNALS)
         }
         return web.json_response(response)
 
@@ -169,7 +224,6 @@ async def send_telegram(text: str):
         logger.warning(f"Telegram error: {e}")
 
 # TA helpers
-
 def rma(series: pd.Series, length: int) -> pd.Series:
     alpha = 1.0 / length
     return series.ewm(alpha=alpha, adjust=False).mean()
@@ -268,6 +322,7 @@ def detect_breakouts(rsi: pd.Series, highs_idx: List[int], lows_idx: List[int], 
                 breakout_angle = math.degrees(math.atan(m2))
     return bull_break, bear_break, breakout_angle
 
+# Mum formasyonu fonksiyonları
 def is_doji(open_p, close_p, high_p, low_p, body_size_threshold=0.1):
     body = abs(close_p - open_p)
     full_range = high_p - low_p
@@ -357,7 +412,6 @@ def detect_candle_formation(df: pd.DataFrame) -> Optional[str]:
     return None
 
 # ----------------------- Skorlama -----------------------
-
 def calculate_signal_strength(signal: SignalInfo) -> float:
     score = 5.0
     if signal.direction == "BULLISH":
@@ -411,7 +465,6 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
     return float(max(0.0, min(10.0, score)))
 
 # ----------------------- Veri Çekme & Analiz -----------------------
-
 def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -425,7 +478,6 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         'close': 'last',
         'volume': 'sum'
     }
-    # FutureWarning'ı çözmek için 'H' -> 'h' yapıldı
     out = df.resample(rule.replace('H', 'h')).agg(agg).dropna()
     return out
 
@@ -469,7 +521,6 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
             raw = fetch_history(yf_symbol, base_interval, period)
             if raw is None or raw.empty: return None
             raw = _standardize_df(raw)
-            # 'H' -> 'h' düzeltmesi
             df = _resample_ohlcv(raw, '4h')
         elif timeframe == '15m':
             base_interval, period = '15m', '60d'
@@ -543,67 +594,59 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
         logger.error(f"Analysis error {symbol} {timeframe}: {e}")
         return None
 
-# ----------------------- Sinyal DB -----------------------
-
-def get_signal_db():
-    db_file = "signals_db.json"
-    if not os.path.exists(db_file) or os.stat(db_file).st_size == 0:
-        return {}
-    with open(db_file, "r") as f:
-        return json.load(f)
-
-def save_signal_db(data):
-    with open("signals_db.json", "w") as f:
-        json.dump(data, f, indent=2)
-
-def save_signal_to_db(signal: SignalInfo):
-    data = get_signal_db()
+# ----------------------- Günlük Sinyal Yönetimi -----------------------
+def is_signal_already_sent_today(symbol: str, direction: str) -> bool:
+    """Bugün bu hisse için bu yönde sinyal gönderildi mi?"""
     today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
-    if today_str not in data:
-        data[today_str] = {}
-    data[today_str][signal.symbol] = {
-        "timeframe": signal.timeframe,
-        "direction": signal.direction,
-        "price": signal.price,
-        "strength_score": signal.strength_score,
-        "timestamp": signal.timestamp
+    signal_key = f"{symbol}_{direction}"
+    
+    # Günlük sinyaller arasında kontrol et
+    if signal_key in DAILY_SIGNALS:
+        signal_date = DAILY_SIGNALS[signal_key].get('date', '')
+        if signal_date == today_str:
+            return True
+    
+    return False
+
+def save_daily_signal(signal: SignalInfo):
+    """Günlük sinyal veritabanına kaydet"""
+    today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
+    signal_key = f"{signal.symbol}_{signal.direction}"
+    
+    DAILY_SIGNALS[signal_key] = {
+        'date': today_str,
+        'symbol': signal.symbol,
+        'direction': signal.direction,
+        'price': signal.price,
+        'timeframe': signal.timeframe,
+        'strength_score': signal.strength_score,
+        'timestamp': signal.timestamp,
+        'volume_ratio': signal.volume_ratio,
+        'rsi': signal.rsi,
+        'sent_time': dt.datetime.now(IST_TZ).isoformat()
     }
-    save_signal_db(data)
 
-# ----------------------- Uyarı Gönder -----------------------
+def clear_old_signals():
+    """Eski günlere ait sinyalleri temizle"""
+    today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
+    keys_to_remove = []
+    
+    for key, signal_data in DAILY_SIGNALS.items():
+        if signal_data.get('date', '') != today_str:
+            keys_to_remove.append(key)
+    
+    for key in keys_to_remove:
+        del DAILY_SIGNALS[key]
 
-def save_last_alert(symbol: str, direction: str):
-    try:
-        data = {}
-        if os.path.exists("last_alerts.json") and os.stat("last_alerts.json").st_size > 0:
-            with open("last_alerts.json", "r") as f:
-                data = json.load(f)
-        data[f"{symbol}_{direction}"] = dt.datetime.now(dt.timezone.utc).isoformat()
-        with open("last_alerts.json", "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        logger.error(f"Sinyal kaydetme hatası: {e}")
-
-def get_last_alert(symbol: str, direction: str) -> Optional[dt.datetime]:
-    try:
-        if os.path.exists("last_alerts.json") and os.stat("last_alerts.json").st_size > 0:
-            with open("last_alerts.json", "r") as f:
-                data = json.load(f)
-            ts = data.get(f"{symbol}_{direction}")
-            if ts:
-                return dt.datetime.fromisoformat(ts)
-    except Exception as e:
-        logger.error(f"Son sinyal okuma hatası: {e}")
-    return None
-
+# ----------------------- Gelişmiş Sinyal Gönderme -----------------------
 async def send_enhanced_alert(signal: SignalInfo):
-    side_key = "AL" if signal.direction == "BULLISH" else "SAT"
-    last_alert_time = get_last_alert(signal.symbol, side_key)
-    if last_alert_time and (dt.datetime.now(dt.timezone.utc) - last_alert_time).total_seconds() < ALERT_COOLDOWN_MIN * 60:
-        logger.info(f"⏳ {signal.symbol} için {side_key} sinyali cooldown'da.")
+    # Aynı gün aynı yönde sinyal gönderildi mi kontrol et
+    if is_signal_already_sent_today(signal.symbol, signal.direction):
+        logger.info(f"⏳ {signal.symbol} için {signal.direction} sinyali bugün zaten gönderildi.")
         return
 
-    save_signal_to_db(signal)
+    # Sinyal kaydet
+    save_daily_signal(signal)
 
     emoji = "🟢📈" if signal.direction == "BULLISH" else "🔴📉"
     direction_text = "AL" if signal.direction == "BULLISH" else "SAT"
@@ -621,7 +664,6 @@ async def send_enhanced_alert(signal: SignalInfo):
     candle_form_str = f"\n🔥 <b>Mum Formasyonu:</b> {signal.candle_formation}" if signal.candle_formation else ""
     stochrsi_str = f"\n• StochRSI({STOCHRSI_K}): K:{signal.stochrsi_k:.1f} | D:{signal.stochrsi_d:.1f}" if signal.stochrsi_k is not None else ""
     ma_cross_str = f"\n• MA Kesişimi: <b>{signal.ma_cross.replace('_', ' ').title()}</b>" if signal.ma_cross else ""
-
 
     msg = f"""<b>{emoji} SİNYAL TESPİT EDİLDİ!</b>
 
@@ -641,31 +683,44 @@ async def send_enhanced_alert(signal: SignalInfo):
 ⚡ <b>Güç:</b> {signal.strength_score:.1f}/10 {strength_stars} {angle_str}
 
 🕐 <b>Zaman:</b> {signal.timestamp} (bar kapanış)
-🔍 <b>Tarama:</b> {SCAN_MODE}
+🔍 <b>Tarama:</b> TÜM BIST ({len(TICKERS)} hisse)
 
-#BIST #{signal.symbol} #{signal.timeframe} #{SCAN_MODE}"""
+#BIST #{signal.symbol} #{signal.timeframe} #TümBIST"""
 
     await send_telegram(msg)
-    save_last_alert(signal.symbol, side_key)
+    logger.info(f"📤 Sinyal gönderildi: {signal.symbol} {signal.direction} - Güç: {signal.strength_score:.1f}")
 
 # ----------------------- Tarama Döngüsü -----------------------
-
 async def run_scan_async():
     global LAST_SCAN_TIME
-    logger.info("🔍 Tam BIST taraması başladı - %s modu", SCAN_MODE)
+    
+    # Borsa saatleri dışındaysa tarama yapma
+    if not is_market_hours():
+        now_ist = dt.datetime.now(IST_TZ)
+        logger.info(f"⏰ Borsa kapalı ({now_ist.strftime('%H:%M')} IST) - Tarama atlanıyor")
+        return
+
+    logger.info(f"🔍 TÜM BIST taraması başladı - {len(TICKERS)} hisse")
+    
+    # Eski sinyalleri temizle
+    clear_old_signals()
+    
     loop = asyncio.get_running_loop()
     signals_by_symbol: Dict[str, List[SignalInfo]] = {}
 
-    with ThreadPoolExecutor(max_workers=min(10, len(TICKERS) * len(TIMEFRAMES))) as executor:
+    # Paralel analiz
+    with ThreadPoolExecutor(max_workers=min(20, len(TICKERS) * len(TIMEFRAMES))) as executor:
         tasks = [loop.run_in_executor(executor, fetch_and_analyze_data, symbol, tf)
                  for symbol in TICKERS for tf in TIMEFRAMES]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    # Sonuçları topla
     for result in results:
         if isinstance(result, Exception) or result is None:
             continue
         signals_by_symbol.setdefault(result.symbol, []).append(result)
 
+    # Çoklu zaman dilimi skorlaması
     weights = {'1d': 4, '4h': 3, '1h': 2, '15m': 1}
     final_signals: List[SignalInfo] = []
 
@@ -678,155 +733,194 @@ async def run_scan_async():
         main.strength_score = calculate_signal_strength(main)
         final_signals.append(main)
 
+    # Sinyalleri gönder
     if final_signals:
         final_signals.sort(key=lambda s: s.strength_score, reverse=True)
+        signal_count = 0
         for s in final_signals:
-            await send_enhanced_alert(s)
+            if not is_signal_already_sent_today(s.symbol, s.direction):
+                await send_enhanced_alert(s)
+                signal_count += 1
+        logger.info(f"📊 {signal_count}/{len(final_signals)} yeni sinyal gönderildi")
     else:
         logger.info("🤷 Herhangi bir sinyal bulunamadı.")
 
     LAST_SCAN_TIME = dt.datetime.now(dt.timezone.utc)
-    logger.info("✅ Tarama tamamlandı. Bir sonraki tarama %s dakika sonra.", CHECK_EVERY_MIN)
+    logger.info(f"✅ Tarama tamamlandı. Bir sonraki tarama {CHECK_EVERY_MIN} dakika sonra.")
 
-# ----------------------- Günlük Rapor -----------------------
-
-async def send_daily_report(loop):
-    data = get_signal_db()
-    today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
-    if today_str not in data:
-        logger.info("Günlük rapor için sinyal verisi bulunamadı.")
+# ----------------------- Günlük Performans Raporu -----------------------
+async def send_daily_performance_report():
+    """Gün sonu detaylı performans raporu"""
+    if not DAILY_SIGNALS:
+        logger.info("📊 Günlük rapor için sinyal verisi bulunamadı.")
         return
-
-    bullish, bearish = [], []
-    for symbol, info in data[today_str].items():
-        try:
-            hist = await loop.run_in_executor(None, lambda: yf.Ticker(f"{symbol}.IS").history(period="1d", interval="1d"))
-            if hist is None or hist.empty: continue
-            end_price = float(hist['Close'].iloc[-1])
-            change_pct = ((end_price - info['price']) / info['price']) * 100.0
-            enriched = dict(info)
-            enriched['end_price'] = end_price
-            enriched['performance_pct'] = change_pct
-            if info['direction'] == "BULLISH": bullish.append(enriched)
-            else: bearish.append(enriched)
-        except Exception as e:
-            logger.error(f"Gün sonu raporu veri hatası: {symbol} - {e}")
-
-    total = len(bullish) + len(bearish)
-    if total == 0: return
-
-    bull_success = sum(1 for s in bullish if s['performance_pct'] > 0)
-    bear_success = sum(1 for s in bearish if s['performance_pct'] < 0)
-
-    bull_rate = (bull_success / len(bullish) * 100) if bullish else 0
-    bear_rate = (bear_success / len(bearish) * 100) if bearish else 0
-    overall_rate = ((bull_success + bear_success) / total * 100) if total else 0
-
-    bull_avg_gain = (sum(s['performance_pct'] for s in bullish if s['performance_pct'] > 0) / bull_success) if bull_success else 0
-    bull_avg_loss = (sum(s['performance_pct'] for s in bullish if s['performance_pct'] < 0) / (len(bullish) - bull_success)) if (len(bullish) - bull_success) else 0
-
-    bear_avg_gain = (sum(s['performance_pct'] for s in bearish if s['performance_pct'] > 0) / (len(bearish) - bear_success)) if (len(bearish) - bear_success) else 0
-    bear_avg_loss = (sum(s['performance_pct'] for s in bearish if s['performance_pct'] < 0) / bear_success) if bear_success else 0
-
-    msg = f"""📊📈📉 <b>Günlük Sinyal Raporu</b> ({today_str}, Istanbul)
-
-✅ <b>Genel İstatistikler:</b>
-- Toplam Sinyal Sayısı: {total}
-- Genel Başarı Oranı: %{overall_rate:.1f}
-
-🟢 <b>Boğa Sinyalleri</b>:
-- Sinyal Sayısı: {len(bullish)}
-- Başarı Oranı: %{bull_rate:.1f}
-- Ortalama Kazanç: +%{bull_avg_gain:.2f}
-- Ortalama Kayıp: %{bull_avg_loss:.2f}
-
-🔴 <b>Ayı Sinyalleri</b>:
-- Sinyal Sayısı: {len(bearish)}
-- Başarı Oranı: %{bear_rate:.1f}
-- Ortalama Kazanç: +%{bear_avg_gain:.2f}
-- Ortalama Kayıp: %{bear_avg_loss:.2f}
-"""
-    await send_telegram(msg)
-
-# ----------------------- Log Analiz Fonksiyonu -----------------------
-
-async def analyze_logs():
-    """Reads log file, counts different log levels, and sends a summary report."""
-    log_file = LOG_FILE
-    if not os.path.exists(log_file):
-        return
-
-    log_counts = {
-        'FutureWarning': 0,
-        'ERROR': 0,
-        'WARNING': 0,
-        'INFO': 0,
-        'TOTAL_LINES': 0
-    }
     
-    try:
-        with open(log_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            last_1000_lines = lines[-1000:]
+    logger.info("📊 Günlük performans raporu hesaplanıyor...")
+    
+    today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
+    performance_data = []
+    
+    loop = asyncio.get_running_loop()
+    
+    for signal_key, signal_data in DAILY_SIGNALS.items():
+        if signal_data.get('date') != today_str:
+            continue
             
-            for line in last_1000_lines:
-                log_counts['TOTAL_LINES'] += 1
-                if 'FutureWarning' in line:
-                    log_counts['FutureWarning'] += 1
-                if 'ERROR' in line:
-                    log_counts['ERROR'] += 1
-                if 'WARNING' in line:
-                    log_counts['WARNING'] += 1
-                if 'INFO' in line:
-                    log_counts['INFO'] += 1
-    except Exception as e:
-        logger.error(f"Error reading log file for analysis: {e}")
+        try:
+            symbol = signal_data['symbol']
+            direction = signal_data['direction']
+            entry_price = signal_data['price']
+            
+            # Güncel fiyatı al
+            hist = await loop.run_in_executor(
+                None, 
+                lambda: yf.Ticker(f"{symbol}.IS").history(period="1d", interval="1d")
+            )
+            
+            if hist is None or hist.empty:
+                continue
+                
+            current_price = float(hist['Close'].iloc[-1])
+            
+            # Performans hesapla
+            if direction == "BULLISH":
+                performance_pct = ((current_price - entry_price) / entry_price) * 100
+                is_profitable = performance_pct > 0
+            else:  # BEARISH
+                performance_pct = ((entry_price - current_price) / entry_price) * 100
+                is_profitable = performance_pct > 0
+            
+            performance_data.append({
+                'symbol': symbol,
+                'direction': direction,
+                'entry_price': entry_price,
+                'current_price': current_price,
+                'performance_pct': performance_pct,
+                'is_profitable': is_profitable,
+                'strength_score': signal_data['strength_score'],
+                'timeframe': signal_data['timeframe'],
+                'sent_time': signal_data['sent_time']
+            })
+            
+        except Exception as e:
+            logger.error(f"Performans hesaplama hatası: {symbol} - {e}")
+    
+    if not performance_data:
         return
+    
+    # İstatistik hesapla
+    total_signals = len(performance_data)
+    profitable_signals = sum(1 for p in performance_data if p['is_profitable'])
+    losing_signals = total_signals - profitable_signals
+    
+    win_rate = (profitable_signals / total_signals * 100) if total_signals > 0 else 0
+    
+    # Ortalama performans
+    avg_profit = sum(p['performance_pct'] for p in performance_data if p['is_profitable']) / max(profitable_signals, 1)
+    avg_loss = sum(p['performance_pct'] for p in performance_data if not p['is_profitable']) / max(losing_signals, 1)
+    total_return = sum(p['performance_pct'] for p in performance_data)
+    
+    # En iyi ve en kötü performanslar
+    best_performer = max(performance_data, key=lambda x: x['performance_pct'])
+    worst_performer = min(performance_data, key=lambda x: x['performance_pct'])
+    
+    # Yön bazında analiz
+    bullish_signals = [p for p in performance_data if p['direction'] == 'BULLISH']
+    bearish_signals = [p for p in performance_data if p['direction'] == 'BEARISH']
+    
+    bullish_win_rate = (sum(1 for p in bullish_signals if p['is_profitable']) / len(bullish_signals) * 100) if bullish_signals else 0
+    bearish_win_rate = (sum(1 for p in bearish_signals if p['is_profitable']) / len(bearish_signals) * 100) if bearish_signals else 0
+    
+    # Tablo oluştur
+    table_rows = []
+    for p in sorted(performance_data, key=lambda x: x['performance_pct'], reverse=True):
+        direction_emoji = "🟢" if p['direction'] == "BULLISH" else "🔴"
+        profit_emoji = "✅" if p['is_profitable'] else "❌"
+        table_rows.append(
+            f"{direction_emoji}{profit_emoji} <b>{p['symbol']}</b> | "
+            f"₺{p['entry_price']:.2f}→₺{p['current_price']:.2f} | "
+            f"<b>{p['performance_pct']:+.1f}%</b> | "
+            f"💪{p['strength_score']:.1f}"
+        )
+    
+    # Rapor mesajı
+    report_msg = f"""📊📈📉 <b>GÜNLÜK PERFORMANS RAPORU</b>
+📅 <b>Tarih:</b> {today_str}
 
-    summary_message = f"""📊 **LOG ANALİZ RAPORU** 📊
----
-Toplam Satır: {log_counts['TOTAL_LINES']}
-ℹ️ INFO: {log_counts['INFO']}
-⚠️ WARNING: {log_counts['WARNING']}
-❌ ERROR: {log_counts['ERROR']}
-🔔 FutureWarning: {log_counts['FutureWarning']}
+🎯 <b>GENEL İSTATİSTİKLER</b>
+━━━━━━━━━━━━━━━━━━━━━━
+📊 Toplam Sinyal: <b>{total_signals}</b>
+✅ Karlı: <b>{profitable_signals}</b> ({win_rate:.1f}%)
+❌ Zararlı: <b>{losing_signals}</b> ({100-win_rate:.1f}%)
 
-💡 **Öneriler:**
-- Yüksek `ERROR` sayısı, veri çekiminde veya analizde problem olduğunu gösterir. Detaylar için log dosyasını kontrol edin.
-"""
-    await send_telegram(summary_message)
+💰 Toplam Getiri: <b>{total_return:+.1f}%</b>
+📈 Ortalama Kar: <b>+{avg_profit:.1f}%</b>
+📉 Ortalama Zarar: <b>{avg_loss:.1f}%</b>
 
-# ----------------------- Main -----------------------
+🏆 <b>EN İYİ/KÖTÜ PERFORMANS</b>
+━━━━━━━━━━━━━━━━━━━━━━
+🥇 En İyi: <b>{best_performer['symbol']}</b> ({best_performer['performance_pct']:+.1f}%)
+🥉 En Kötü: <b>{worst_performer['symbol']}</b> ({worst_performer['performance_pct']:+.1f}%)
 
+🎯 <b>YÖN BAZINDA ANALİZ</b>
+━━━━━━━━━━━━━━━━━━━━━━
+🟢 Boğa Sinyalleri: {len(bullish_signals)} ({bullish_win_rate:.1f}% başarı)
+🔴 Ayı Sinyalleri: {len(bearish_signals)} ({bearish_win_rate:.1f}% başarı)
+
+📋 <b>DETAYLI TABLO</b>
+━━━━━━━━━━━━━━━━━━━━━━
+{chr(10).join(table_rows[:20])}  
+
+🔍 <b>Tarama Kapsamı:</b> {len(TICKERS)} BIST hissesi
+⏰ <b>Rapor Saati:</b> {dt.datetime.now(IST_TZ).strftime('%H:%M')} İST
+
+#GünlükRapor #BISTPerformans #TümBIST"""
+    
+    await send_telegram(report_msg)
+    logger.info("📊 Günlük performans raporu gönderildi")
+
+# ----------------------- Main Loop -----------------------
 async def main():
-    logger.info("🚀 Gelişmiş BIST Sinyal Botu başlatılıyor...")
+    logger.info("🚀 TÜM BIST Sinyal Botu başlatılıyor...")
+    logger.info(f"📊 Taranacak hisse sayısı: {len(TICKERS)}")
+    logger.info(f"⏰ Çalışma saatleri: {MARKET_OPEN_HOUR:02d}:00 - {MARKET_CLOSE_HOUR:02d}:{MARKET_CLOSE_MINUTE:02d} İST")
+    logger.info(f"🔄 Tarama sıklığı: {CHECK_EVERY_MIN} dakika")
+    
     stop_event = asyncio.Event()
     health_task = asyncio.create_task(start_health_server(asyncio.get_running_loop(), stop_event))
     
-    await run_scan_async()
+    # İlk tarama
+    if is_market_hours():
+        await run_scan_async()
     
-    last_report_date = dt.datetime.now(IST_TZ).date()
-    last_log_analysis_date = dt.datetime.now(IST_TZ).date()
+    last_report_date = None
     
     try:
         while True:
             now_ist = dt.datetime.now(IST_TZ)
             
-            # Günlük rapor: her gün 18:30 IST
-            if now_ist.hour == 18 and now_ist.minute == 30 and now_ist.date() != last_report_date:
-                await send_daily_report(asyncio.get_running_loop())
+            # Günlük rapor: 18:30'da
+            if (now_ist.hour == DAILY_REPORT_HOUR and 
+                now_ist.minute == DAILY_REPORT_MINUTE and 
+                now_ist.date() != last_report_date):
+                
+                await send_daily_performance_report()
                 last_report_date = now_ist.date()
                 
-            # Log analizi: her gün 08:00 IST (Piyasa açılışı öncesi)
-            if now_ist.hour == 8 and now_ist.date() != last_log_analysis_date:
-                await analyze_logs()
-                last_log_analysis_date = now_ist.date()
-
-            await asyncio.sleep(CHECK_EVERY_MIN * 60)
-            await run_scan_async()
+                # Günlük sinyalleri sıfırla
+                DAILY_SIGNALS.clear()
             
+            # 15 dakika bekle
+            await asyncio.sleep(CHECK_EVERY_MIN * 60)
+            
+            # Borsa saatleri içindeyse tarama yap
+            if is_market_hours():
+                await run_scan_async()
+            else:
+                logger.info("⏰ Borsa kapalı - Tarama atlanıyor")
+                
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot durduruluyor...")
+        logger.info("🛑 Bot durduruluyor...")
         stop_event.set()
     finally:
         await health_task
