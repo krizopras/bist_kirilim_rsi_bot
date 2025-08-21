@@ -594,9 +594,39 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
         logger.error(f"Analysis error {symbol} {timeframe}: {e}")
         return None
 
-# ----------------------- Günlük Sinyal Yönetimi -----------------------
+# ----------------------- Sinyal Veritabanı (Disk Tabanlı) -----------------------
+def get_signals_db_file():
+    """Günlük sinyal dosyası adı"""
+    today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
+    return f"signals_{today_str}.json"
+
+def load_daily_signals_from_disk():
+    """Disk tabanlı günlük sinyalleri yükle"""
+    global DAILY_SIGNALS
+    db_file = get_signals_db_file()
+    
+    if os.path.exists(db_file) and os.stat(db_file).st_size > 0:
+        try:
+            with open(db_file, 'r', encoding='utf-8') as f:
+                DAILY_SIGNALS = json.load(f)
+            logger.info(f"📂 {len(DAILY_SIGNALS)} günlük sinyal yüklendi")
+        except Exception as e:
+            logger.error(f"Günlük sinyaller yüklenemedi: {e}")
+            DAILY_SIGNALS = {}
+    else:
+        DAILY_SIGNALS = {}
+
+def save_daily_signals_to_disk():
+    """Günlük sinyalleri diske kaydet"""
+    db_file = get_signals_db_file()
+    try:
+        with open(db_file, 'w', encoding='utf-8') as f:
+            json.dump(DAILY_SIGNALS, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Günlük sinyaller kaydedilemedi: {e}")
+
 def is_signal_already_sent_today(symbol: str, direction: str) -> bool:
-    """Bugün bu hisse için bu yönde sinyal gönderildi mi?"""
+    """Bugün bu hisse için bu yönde sinyal gönderildi mi? - Disk tabanlı kontrol"""
     today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
     signal_key = f"{symbol}_{direction}"
     
@@ -609,7 +639,7 @@ def is_signal_already_sent_today(symbol: str, direction: str) -> bool:
     return False
 
 def save_daily_signal(signal: SignalInfo):
-    """Günlük sinyal veritabanına kaydet"""
+    """Günlük sinyal veritabanına kaydet - Disk tabanlı"""
     today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
     signal_key = f"{signal.symbol}_{signal.direction}"
     
@@ -625,9 +655,12 @@ def save_daily_signal(signal: SignalInfo):
         'rsi': signal.rsi,
         'sent_time': dt.datetime.now(IST_TZ).isoformat()
     }
+    
+    # Diske kaydet
+    save_daily_signals_to_disk()
 
 def clear_old_signals():
-    """Eski günlere ait sinyalleri temizle"""
+    """Eski günlere ait sinyalleri temizle - Disk tabanlı"""
     today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
     keys_to_remove = []
     
@@ -635,8 +668,11 @@ def clear_old_signals():
         if signal_data.get('date', '') != today_str:
             keys_to_remove.append(key)
     
-    for key in keys_to_remove:
-        del DAILY_SIGNALS[key]
+    if keys_to_remove:
+        for key in keys_to_remove:
+            del DAILY_SIGNALS[key]
+        save_daily_signals_to_disk()
+        logger.info(f"🗑️ {len(keys_to_remove)} eski sinyal temizlendi")
 
 # ----------------------- Gelişmiş Sinyal Gönderme -----------------------
 async def send_enhanced_alert(signal: SignalInfo):
@@ -899,25 +935,26 @@ async def main():
         while True:
             now_ist = dt.datetime.now(IST_TZ)
             
-            # Günlük rapor: 18:30'da
+            # Günlük rapor: 18:30'da (sadece rapor, taramayı sınırlamıyor)
             if (now_ist.hour == DAILY_REPORT_HOUR and 
-                now_ist.minute == DAILY_REPORT_MINUTE and 
+                now_ist.minute >= DAILY_REPORT_MINUTE and 
+                now_ist.minute < DAILY_REPORT_MINUTE + 5 and  # 18:30-18:35 arası
                 now_ist.date() != last_report_date):
                 
                 await send_daily_performance_report()
                 last_report_date = now_ist.date()
                 
-                # Günlük sinyalleri sıfırla
-                DAILY_SIGNALS.clear()
-            
-            # 15 dakika bekle
-            await asyncio.sleep(CHECK_EVERY_MIN * 60)
+                # Günlük sinyalleri sıfırla (sadece rapor sonrası)
+                logger.info("🔄 Günlük sinyaller temizlendi")
             
             # Borsa saatleri içindeyse tarama yap
             if is_market_hours():
                 await run_scan_async()
             else:
-                logger.info("⏰ Borsa kapalı - Tarama atlanıyor")
+                logger.info(f"⏰ Borsa kapalı ({now_ist.strftime('%H:%M')} IST) - Tarama atlanıyor")
+            
+            # 15 dakika bekle
+            await asyncio.sleep(CHECK_EVERY_MIN * 60)
                 
     except (KeyboardInterrupt, SystemExit):
         logger.info("🛑 Bot durduruluyor...")
