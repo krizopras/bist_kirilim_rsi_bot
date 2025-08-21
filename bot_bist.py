@@ -163,7 +163,7 @@ STOCHRSI_K = int(os.getenv("STOCHRSI_K", "3"))
 STOCHRSI_D = int(os.getenv("STOCHRSI_D", "3"))
 MA_SHORT = int(os.getenv("MA_SHORT", "50"))
 MA_LONG = int(os.getenv("MA_LONG", "200"))
-MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "9.0")) # DEĞİŞTİ!
+MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "10.0")) # DEĞİŞTİ!
 
 LAST_SCAN_TIME: Optional[dt.datetime] = None
 START_TIME = time.time()
@@ -506,7 +506,38 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
             score += 4.0
         elif signal.direction == "BEARISH" and signal.ma_cross == "DEATH_CROSS":
             score += 4.0
-            
+     def calculate_signal_strength(signal: SignalInfo) -> float:
+    score = 5.0
+    
+    # ... (Mevcut puanlama kodları buraya gelecek) ...
+    # RSI, Hacim, MACD, BB, Mum Formasyonu vs. puanlamaları
+    
+    # --- YENİ EKLENEN BONUS PUANLAMA MEKANİZMASI ---
+    
+    # Golden Cross + Hacim Patlaması
+    # Trend dönüşü ve hacim onayı çok güçlü bir sinyaldir.
+    if signal.ma_cross == "GOLDEN_CROSS" and signal.volume_ratio > 3.0:
+        score += 3.0
+        
+    # RSI Diverjans Kırılımı + Yüksek Hacim
+    # Fiyat trendiyle RSI trendinin ters yönlü olduğu bir durumun kırılımı, güçlü bir dönüş sinyalidir.
+    if signal.breakout_angle is not None and abs(signal.breakout_angle) > 20 and signal.volume_ratio > 2.0:
+        if signal.direction == "BULLISH" and signal.rsi < 40:
+            score += 3.0
+        elif signal.direction == "BEARISH" and signal.rsi > 60:
+            score += 3.0
+
+    # Güçlü Mum Formasyonu + MACD Kırılımı + Yüksek Hacim
+    # En net sinyal kombinasyonlarından biridir.
+    if signal.candle_formation in ["Bullish Engulfing", "Three White Soldiers"] and \
+       signal.macd_signal == "BULLISH" and signal.volume_ratio > 2.5:
+        score += 4.0
+    
+    # Tam tersi ayı sinyali için
+    if signal.candle_formation in ["Bearish Engulfing", "Three Black Crows"] and \
+       signal.macd_signal == "BEARISH" and signal.volume_ratio > 2.5:
+        score += 4.0
+       
     return float(max(0.0, min(10.0, score)))
 
 # --- Veri Çekme & Analiz ---
