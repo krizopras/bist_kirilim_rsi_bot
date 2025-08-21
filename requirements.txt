@@ -13,3 +13,6 @@ pytz>=2023.3
 
 # Optional: Memory monitoring (will be ignored if not available)
 psutil>=5.9.0
+
+# Graphing
+matplotlib>=3.5.1
