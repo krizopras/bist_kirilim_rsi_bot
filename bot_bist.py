@@ -613,11 +613,11 @@ def fetch_and_analyze_data(symbol: str) -> Optional[SignalInfo]:
         
         for tf, params in ZAMAN_DILIMLERI.items():
             if tf == '1d':
-                base_interval, period = '1d', f"60d"
+                base_interval, period = '1d', '60d'
                 df = fetch_history(yf_symbol, base_interval, period)
                 df = _standardize_df(df)
             elif tf == '1h':
-                base_interval, period = '1h', f"60d"
+                base_interval, period = '1h', '60d'
                 df = fetch_history(yf_symbol, base_interval, period)
                 df = _standardize_df(df)
             elif tf == '4h':
@@ -627,7 +627,7 @@ def fetch_and_analyze_data(symbol: str) -> Optional[SignalInfo]:
                 raw = _standardize_df(raw)
                 df = _resample_ohlcv(raw, '4h')
             elif tf == '15m':
-                base_interval, period = '15m', f"60d"
+                base_interval, period = '15m', '60d'
                 df = fetch_history(yf_symbol, base_interval, period)
                 df = _standardize_df(df)
             else:
