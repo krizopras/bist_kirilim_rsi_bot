@@ -3,7 +3,7 @@ services:
     name: rsi-bot-bist
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot_bist.py
+    startCommand: python main.py
     plan: starter
     healthCheckPath: /health
     envVars:
@@ -14,33 +14,29 @@ services:
         value: 1h,4h,1d
       - key: CHECK_EVERY_MIN
         value: 15
+      - key: MIN_PRICE
+        value: 1.0
+      - key: MIN_VOLUME_TRY
+        value: 1000000
+      - key: MIN_SIGNAL_SCORE
+        value: 8.0
       
-      # RSI Parameters
+      # TA Parameters
       - key: RSI_LEN
         value: 22
-      - key: RSI_EMA_LEN
-        value: 66
-      - key: PIVOT_PERIOD
-        value: 10
-      - key: ALERT_COOLDOWN_MIN
-        value: 60
-      
-      # Enhanced Parameters
-      - key: MIN_VOLUME_RATIO
-        value: 1.5
       - key: MACD_FAST
         value: 12
       - key: MACD_SLOW
         value: 26
       - key: MACD_SIGNAL
         value: 9
-      - key: BB_PERIOD
-        value: 20
-      - key: BB_MULT
-        value: 2.0
-      - key: CANDLE_FORM_THRESHOLD
-        value: 0.7
-      
+      - key: MA_SHORT
+        value: 50
+      - key: MA_LONG
+        value: 200
+      - key: MIN_VOLUME_RATIO
+        value: 1.5
+
       # Logging
       - key: LOG_LEVEL
         value: INFO
@@ -49,4 +45,6 @@ services:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: COLLECTAPI_KEY
         sync: false
