@@ -220,6 +220,14 @@ async def send_telegram(text: str):
             async with session.post(TELEGRAM_API_URL, json=payload, timeout=15) as r:
                 if r.status != 200:
                     logger.warning(f"Telegram failed: {r.status} - {await r.text()}")
+                    if r.status == 429:
+                        try:
+                            retry_after = r.headers.get("retry-after", 10)
+                            logger.info(f"Telegram 429 hatası aldı, {retry_after} saniye bekleniyor...")
+                            await asyncio.sleep(int(retry_after) + 1)
+                        except (ValueError, TypeError):
+                            logger.info("retry-after değeri okunamadı, 60 saniye bekleniyor...")
+                            await asyncio.sleep(60)
     except Exception as e:
         logger.warning(f"Telegram error: {e}")
 
@@ -506,21 +514,14 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
             score += 4.0
         elif signal.direction == "BEARISH" and signal.ma_cross == "DEATH_CROSS":
             score += 4.0
-     def calculate_signal_strength(signal: SignalInfo) -> float:
-    score = 5.0
-    
-    # ... (Mevcut puanlama kodları buraya gelecek) ...
-    # RSI, Hacim, MACD, BB, Mum Formasyonu vs. puanlamaları
     
     # --- YENİ EKLENEN BONUS PUANLAMA MEKANİZMASI ---
     
     # Golden Cross + Hacim Patlaması
-    # Trend dönüşü ve hacim onayı çok güçlü bir sinyaldir.
     if signal.ma_cross == "GOLDEN_CROSS" and signal.volume_ratio > 3.0:
         score += 3.0
         
     # RSI Diverjans Kırılımı + Yüksek Hacim
-    # Fiyat trendiyle RSI trendinin ters yönlü olduğu bir durumun kırılımı, güçlü bir dönüş sinyalidir.
     if signal.breakout_angle is not None and abs(signal.breakout_angle) > 20 and signal.volume_ratio > 2.0:
         if signal.direction == "BULLISH" and signal.rsi < 40:
             score += 3.0
@@ -528,7 +529,6 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
             score += 3.0
 
     # Güçlü Mum Formasyonu + MACD Kırılımı + Yüksek Hacim
-    # En net sinyal kombinasyonlarından biridir.
     if signal.candle_formation in ["Bullish Engulfing", "Three White Soldiers"] and \
        signal.macd_signal == "BULLISH" and signal.volume_ratio > 2.5:
         score += 4.0
@@ -537,7 +537,7 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
     if signal.candle_formation in ["Bearish Engulfing", "Three Black Crows"] and \
        signal.macd_signal == "BEARISH" and signal.volume_ratio > 2.5:
         score += 4.0
-       
+        
     return float(max(0.0, min(10.0, score)))
 
 # --- Veri Çekme & Analiz ---
@@ -681,8 +681,8 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
         
         # 3. MACD veya RSI kırılımı sinyali yoksa hemen ele
         if base_signal.macd_signal == "NEUTRAL" and base_signal.breakout_angle is None:
-             return None
-             
+            return None
+            
         # 4. Fiyat konsolidasyon bölgesindeyken sinyalleri ele
         if base_signal.rsi > 40 and base_signal.rsi < 60 and base_signal.strength_score < 8.5:
             return None
@@ -749,146 +749,129 @@ def save_daily_signal(signal: SignalInfo):
         'strength_score': signal.strength_score,
         'timestamp': signal.timestamp,
         'volume_ratio': signal.volume_ratio,
-        'rsi': signal.rsi,
         'sent_time': dt.datetime.now(IST_TZ).isoformat()
     }
-    
     save_daily_signals_to_disk()
-
-def clear_old_signals():
-    """Eski günlere ait sinyalleri temizle - Disk tabanlı"""
-    today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
-    keys_to_remove = []
     
-    for key, signal_data in DAILY_SIGNALS.items():
-        if signal_data.get('date', '') != today_str:
-            keys_to_remove.append(key)
-    
-    if keys_to_remove:
-        for key in keys_to_remove:
-            del DAILY_SIGNALS[key]
-        save_daily_signals_to_disk()
-        logger.info(f"🗑️ {len(keys_to_remove)} eski sinyal temizlendi")
-
-# --- Gelişmiş Sinyal Gönderme ---
 async def send_enhanced_alert(signal: SignalInfo):
-    if is_signal_already_sent_today(signal.symbol, signal.direction):
-        logger.info(f"⏳ {signal.symbol} için {signal.direction} sinyali bugün zaten gönderildi.")
-        return
+    """Gelişmiş sinyal uyarısını Telegram'a gönderir."""
+    emoji = "🟢" if signal.direction == "BULLISH" else "🔴"
+    trend_emoji = "📈" if signal.direction == "BULLISH" else "📉"
+    
+    message = (
+        f"<b>{emoji} Sinyal: {signal.symbol}.IS</b>\n\n"
+        f"• Yön: <b>{signal.direction}</b>\n"
+        f"• Zaman Dilimi: <b>{signal.timeframe.upper()}</b>\n"
+        f"• Son Fiyat: <b>{signal.price:.2f} ₺</b>\n"
+        f"• Sinyal Gücü: <b>{signal.strength_score:.1f}/10</b>\n"
+        f"• Hacim Oranı: {signal.volume_ratio:.1f}x (Normalin <b>{signal.volume_ratio:.1f} katı</b>)\n"
+        f"• MACD: {signal.macd_signal}\n"
+    )
+    
+    if signal.candle_formation:
+        message += f"• Mum Formasyonu: <b>{signal.candle_formation}</b>\n"
+    
+    if signal.breakout_angle:
+        message += f"• RSI Kırılımı: <b>{signal.breakout_angle:.1f}°</b>\n"
 
-    save_daily_signal(signal)
+    if signal.ma_cross:
+        if signal.ma_cross == "GOLDEN_CROSS":
+            message += f"• Trend Değişimi: <b>{signal.ma_cross}</b>\n"
+        else:
+            message += f"• Trend Değişimi: <b>{signal.ma_cross}</b>\n"
 
-    emoji = "🟢📈" if signal.direction == "BULLISH" else "🔴📉"
-    direction_text = "AL" if signal.direction == "BULLISH" else "SAT"
-    strength_stars = "⭐" * min(5, int(signal.strength_score / 2))
+    message += f"\n{trend_emoji} {signal.symbol} için güçlü bir {signal.direction} sinyali oluştu."
+    
+    await send_telegram(message)
+    logger.info(f"✅ Telegram'a sinyal gönderildi: {signal.symbol} - {signal.direction} - {signal.strength_score:.1f}/10")
 
-    if signal.volume_ratio > 5.0: volume_emoji = "🚀"
-    elif signal.volume_ratio > 3.0: volume_emoji = "🔥"
-    else: volume_emoji = "📈"
+# --- Ana Tarama Döngüsü ---
+async def scan_stock_async(symbol: str) -> List[SignalInfo]:
+    """Her bir hisse senedi için asenkron tarama ve analiz yapar."""
+    signals: List[SignalInfo] = []
+    for tf in TIMEFRAMES:
+        signal = await asyncio.to_thread(fetch_and_analyze_data, symbol, tf)
+        if signal and signal.strength_score >= MIN_SIGNAL_SCORE:
+            signals.append(signal)
+            logger.info(f"🎉 Sinyal Bulundu: {symbol} - {tf} - Güç: {signal.strength_score:.1f}")
+    return signals
 
-    if signal.volume_try >= 1_000_000: volume_str = f"{signal.volume_try/1_000_000:.1f}M TL"
-    elif signal.volume_try >= 1_000: volume_str = f"{signal.volume_try/1_000:.0f}K TL"
-    else: volume_str = f"{signal.volume_try:.0f} TL"
-
-    angle_str = f"({signal.breakout_angle:.1f}°)" if signal.breakout_angle is not None else ""
-    candle_form_str = f"\n🔥 <b>Mum Formasyonu:</b> {signal.candle_formation}" if signal.candle_formation else ""
-    stochrsi_str = f"\n• StochRSI({STOCHRSI_K}): K:{signal.stochrsi_k:.1f} | D:{signal.stochrsi_d:.1f}" if signal.stochrsi_k is not None else ""
-    ma_cross_str = f"\n• MA Kesişimi: <b>{signal.ma_cross.replace('_', ' ').title()}</b>" if signal.ma_cross else ""
-
-    msg = f"""<b>{emoji} SİNYAL TESPİT EDİLDİ!</b>
-
-📊 <b>Hisse:</b> {signal.symbol}.IS
-⏰ <b>Zaman:</b> {signal.timeframe}
-🎯 <b>Yön:</b> {direction_text}
-💰 <b>Fiyat:</b> ₺{signal.price:.2f}
-{candle_form_str}
-
-📈 <b>Teknik Durum:</b>
-• RSI({RSI_LEN}): {signal.rsi:.1f}
-• RSI EMA({RSI_EMA_LEN}): {signal.rsi_ema:.1f}
-• MACD: {signal.macd_signal}
-• BB Pozisyon: {signal.bb_position}{stochrsi_str}{ma_cross_str}
-
-{volume_emoji} <b>Hacim:</b> {signal.volume_ratio:.1f}x ({volume_str})
-⚡ <b>Güç:</b> {signal.strength_score:.1f}/10 {strength_stars} {angle_str}
-
-🕐 <b>Zaman:</b> {signal.timestamp} (bar kapanış)
-🔍 <b>Tarama:</b> TÜM BIST ({len(TICKERS)} hisse)
-
-#BIST #{signal.symbol} #{signal.timeframe} #TümBIST"""
-
-    await send_telegram(msg)
-    logger.info(f"📤 Sinyal gönderildi: {signal.symbol} {signal.direction} - Güç: {signal.strength_score:.1f}")
-
-# --- Tarama Döngüsü ---
 async def run_scan_async():
+    """Tüm hisseleri paralel olarak tarar."""
     global LAST_SCAN_TIME
+    logger.info("⏳ BIST taraması başlıyor...")
     
-    if not is_market_hours():
-        now_ist = dt.datetime.now(IST_TZ)
-        if now_ist.time() >= dt.time(DAILY_REPORT_HOUR, DAILY_REPORT_MINUTE) and now_ist.weekday() < 5:
-            await send_daily_report()
-            # Rapor gönderildikten sonra günlük sinyalleri temizle
-            clear_old_signals()
-        logger.info("Piyasa kapalı. Tarama yapılmıyor.")
-        return
-
-    logger.info("Tarama başlıyor...")
-    tasks = []
-    
-    # Paralel işlem için ThreadPoolExecutor kullanıyoruz
-    with ThreadPoolExecutor(max_workers=os.cpu_count() * 2) as executor:
-        loop = asyncio.get_running_loop()
-        futures = {
-            loop.run_in_executor(executor, fetch_and_analyze_data, symbol, tf)
-            for symbol in TICKERS
-            for tf in TIMEFRAMES
-        }
-
-        found_signals: List[SignalInfo] = []
-        for future in asyncio.as_completed(futures):
-            signal = await future
-            if signal and signal.strength_score >= MIN_SIGNAL_SCORE:
-                found_signals.append(signal)
-
-    if found_signals:
-        for signal in found_signals:
-            await send_enhanced_alert(signal)
-    else:
-        logger.info("Bu taramada sinyal bulunamadı.")
-        
-    LAST_SCAN_TIME = dt.datetime.now(IST_TZ)
-
-async def periodic_scan_loop():
-    while True:
-        try:
-            await run_scan_async()
-            await asyncio.sleep(CHECK_EVERY_MIN * 60)
-        except asyncio.CancelledError:
-            logger.info("Tarama döngüsü sonlandırıldı.")
-            break
-        except Exception as e:
-            logger.error(f"Hata: {e}")
-            await asyncio.sleep(60)
-
-async def main():
-    logger.info("Bot başlatılıyor...")
+    # Günlük sinyal veritabanını yükle
     load_daily_signals_from_disk()
-    clear_old_signals()
+
+    tasks = [scan_stock_async(ticker) for ticker in TICKERS]
     
+    # Paralel işlem limiti belirleme
+    semaphore = asyncio.Semaphore(10) # Aynı anda 10 task çalıştırır
+    async def limited_scan(task):
+        async with semaphore:
+            return await task
+    
+    results = await asyncio.gather(*[limited_scan(t) for t in tasks])
+    
+    total_signals_found = 0
+    for signals_list in results:
+        for signal in signals_list:
+            if not is_signal_already_sent_today(signal.symbol, signal.direction):
+                await send_enhanced_alert(signal)
+                save_daily_signal(signal)
+                total_signals_found += 1
+    
+    LAST_SCAN_TIME = dt.datetime.now(IST_TZ)
+    logger.info(f"✅ Tarama tamamlandı. Toplam bulunan yeni sinyal: {total_signals_found}")
+
+async def main_loop():
+    """Botun ana döngüsünü yönetir."""
+    first_run = True
+    while True:
+        now_ist = dt.datetime.now(IST_TZ)
+        
+        # Pazar ve hafta sonu kontrolü
+        if not is_market_hours():
+            logger.info("Borsa kapalı. Pazar saati bekleniyor.")
+            
+            # Günlük raporu gönderme
+            if now_ist.hour == DAILY_REPORT_HOUR and now_ist.minute == DAILY_REPORT_MINUTE:
+                if 'daily_report_sent' not in DAILY_SIGNALS:
+                    await send_daily_report()
+                    DAILY_SIGNALS['daily_report_sent'] = 'sent' # Raporun gönderildiğini işaretle
+                    save_daily_signals_to_disk()
+            
+            # Günlük sinyal veritabanını resetleme (yeni gün başlangıcı)
+            if now_ist.hour == 0 and now_ist.minute < CHECK_EVERY_MIN and 'daily_report_sent' in DAILY_SIGNALS:
+                logger.info("Yeni gün başladı, günlük sinyal listesi sıfırlanıyor.")
+                DAILY_SIGNALS.clear()
+                save_daily_signals_to_disk()
+            
+            await asyncio.sleep(60)
+            continue
+
+        if first_run or (LAST_SCAN_TIME and (now_ist - LAST_SCAN_TIME).total_seconds() >= CHECK_EVERY_MIN * 60):
+            await run_scan_async()
+            first_run = False
+        
+        # Sonraki kontrol zamanına kadar bekleme
+        await asyncio.sleep(30)
+        
+# --- Bot Başlangıcı ---
+if __name__ == "__main__":
     app = web.Application()
     app.router.add_get('/health', HealthHandler)
-    runner = web.AppRunner(app)
     
-    try:
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', HEALTH_CHECK_PORT)
-        await site.start()
-        logger.info(f"Sağlık kontrolü portu açıldı: {HEALTH_CHECK_PORT}")
-        
-        await periodic_scan_loop()
-    finally:
-        await runner.cleanup()
+    # Arka plan görevlerini yönetmek için aiohttp'nin yerleşik mekanizması
+    async def start_background_tasks(app):
+        app['main_loop_task'] = asyncio.create_task(main_loop())
+    
+    async def cleanup_background_tasks(app):
+        app['main_loop_task'].cancel()
+        await app['main_loop_task']
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    app.on_startup.append(start_background_tasks)
+    app.on_cleanup.append(cleanup_background_tasks)
+
+    web.run_app(app, host='0.0.0.0', port=HEALTH_CHECK_PORT)
