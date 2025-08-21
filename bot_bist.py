@@ -32,6 +32,10 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from dotenv import load_dotenv
 import investpy
+from ta.momentum import RSIIndicator, StochRSIIndicator
+from ta.trend import MACD, EMAIndicator, ADXIndicator, CCIIndicator
+from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volume import OnBalanceVolumeIndicator
 
 # Yerel test için .env dosyasını yükler. Render'da bu satır bir şey yapmaz.
 load_dotenv()
@@ -145,7 +149,16 @@ else:
     TICKERS = ALL_BIST_STOCKS
 
 CHECK_EVERY_MIN = int(os.getenv("CHECK_EVERY_MIN", "15"))
-TIMEFRAMES = [t.strip() for t in os.getenv("TIMEFRAMES", "").split(',') if t.strip()] or ["1d", "4h", "1h", "15m"]
+
+# YENİ ZAMAN DİLİMLERİ VE AĞIRLIKLARI
+ZAMAN_DILIMLERI = {
+    '15m': {'limit': 150, 'agirlik': 0.15},
+    '1h': {'limit': 150, 'agirlik': 0.35},
+    '4h': {'limit': 150, 'agirlik': 0.30},
+    '1d': {'limit': 150, 'agirlik': 0.20}
+}
+TIMEFRAMES = list(ZAMAN_DILIMLERI.keys())
+
 MIN_PRICE = float(os.getenv("MIN_PRICE", "1.0"))
 MIN_VOLUME_TRY = float(os.getenv("MIN_VOLUME_TRY", "5000000")) # DEĞİŞTİ!
 MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "2.0")) # DEĞİŞTİ!
@@ -164,6 +177,7 @@ STOCHRSI_D = int(os.getenv("STOCHRSI_D", "3"))
 MA_SHORT = int(os.getenv("MA_SHORT", "50"))
 MA_LONG = int(os.getenv("MA_LONG", "200"))
 MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "10.0")) # DEĞİŞTİ!
+MIN_MULTI_TF_SCORE = float(os.getenv("MIN_MULTI_TF_SCORE", "7.0")) # Yeni parametre
 
 LAST_SCAN_TIME: Optional[dt.datetime] = None
 START_TIME = time.time()
@@ -176,20 +190,21 @@ class SignalInfo:
     direction: str
     price: float
     rsi: float
-    rsi_ema: float
+    stoch_rsi: float
+    macd_val: float
+    macd_signal_val: float
+    ema_7: float
+    ema_25: float
+    adx: float
     volume_ratio: float
     volume_try: float
-    macd_signal: str
     bb_position: str
     strength_score: float
     timestamp: str
     breakout_angle: Optional[float] = None
     candle_formation: Optional[str] = None
-    multi_tf_score: Optional[float] = None
-    stochrsi_k: Optional[float] = None
-    stochrsi_d: Optional[float] = None
     ma_cross: Optional[str] = None
-
+    
 # --- Sağlık Kontrolü ---
 class HealthHandler(web.View):
     async def get(self):
@@ -274,43 +289,6 @@ def ema(series: pd.Series, length: int) -> pd.Series:
 
 def sma(series: pd.Series, length: int) -> pd.Series:
     return series.rolling(window=length).mean()
-
-def calculate_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
-    ema_fast = ema(close, fast)
-    ema_slow = ema(close, slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = ema(macd_line, signal)
-    histogram = macd_line - signal_line
-    return macd_line, signal_line, histogram
-
-def calculate_bollinger_bands(close: pd.Series, period: int = 20, mult: float = 2.0):
-    middle = sma(close, period)
-    std = close.rolling(window=period).std()
-    upper = middle + (std * mult)
-    lower = middle - (std * mult)
-    return upper, middle, lower
-
-def calculate_stoch_rsi(rsi_series: pd.Series, length: int = 14, k: int = 3, d: int = 3):
-    min_rsi = rsi_series.rolling(window=length).min()
-    max_rsi = rsi_series.rolling(window=length).max()
-    stoch_rsi = (rsi_series - min_rsi) / (max_rsi - min_rsi)
-    stoch_rsi = stoch_rsi.fillna(0) * 100
-    stoch_rsi_k = stoch_rsi.rolling(window=k).mean()
-    stoch_rsi_d = stoch_rsi_k.rolling(window=d).mean()
-    if stoch_rsi_k.empty or stoch_rsi_d.empty:
-        return None, None
-    return float(stoch_rsi_k.iloc[-1]), float(stoch_rsi_d.iloc[-1])
-
-def detect_ma_cross(close_series: pd.Series, short_period: int, long_period: int) -> Optional[str]:
-    if len(close_series) < max(short_period, long_period) + 1:
-        return None
-    short_ma = sma(close_series, short_period)
-    long_ma = sma(close_series, long_period)
-    if short_ma.iloc[-1] > long_ma.iloc[-1] and short_ma.iloc[-2] <= long_ma.iloc[-2]:
-        return "GOLDEN_CROSS"
-    elif short_ma.iloc[-1] < long_ma.iloc[-1] and short_ma.iloc[-2] >= long_ma.iloc[-2]:
-        return "DEATH_CROSS"
-    return None
 
 def find_pivots(arr: pd.Series, left: int, right: int) -> Tuple[List[int], List[int]]:
     highs, lows = [], []
@@ -441,104 +419,115 @@ def detect_candle_formation(df: pd.DataFrame) -> Optional[str]:
     if is_doji(open_p, close_p, high_p, low_p): return "Doji"
     return None
 
-def calculate_signal_strength(signal: SignalInfo) -> float:
-    score = 5.0
-    
-    # RSI puanlaması
-    if signal.direction == "BULLISH":
-        if signal.rsi < 30: score += 3.0
-        elif signal.rsi < 50: score += 1.0
-    else:
-        if signal.rsi > 70: score += 3.0
-        elif signal.rsi > 50: score += 1.0
-        
-    # Hacim puanlaması (Ağırlık Artırıldı)
-    if signal.volume_ratio > 4.0: score += 4.0 # Çok yüksek hacim
-    elif signal.volume_ratio > 3.0: score += 3.0
-    elif signal.volume_ratio > 2.0: score += 2.0
-    elif signal.volume_ratio > 1.5: score += 1.0
-    
-    # MACD ve RSI Uyumu (Ağırlık Artırıldı)
-    if (signal.direction == "BULLISH" and signal.macd_signal == "BULLISH") or \
-       (signal.direction == "BEARISH" and signal.macd_signal == "BEARISH"):
-        score += 2.5
-        
-    # RSI EMA puanlaması
-    if (signal.direction == "BULLISH" and signal.rsi > signal.rsi_ema) or \
-       (signal.direction == "BEARISH" and signal.rsi < signal.rsi_ema):
-        score += 1.0
-        
-    # Bollinger Bandı pozisyonu
-    if signal.bb_position in ("NEAR_LOWER", "LOWER") and signal.direction == "BULLISH":
-        score += 0.5
-    if signal.bb_position in ("NEAR_UPPER", "UPPER") and signal.direction == "BEARISH":
-        score += 0.5
-        
-    # Fiyat puanlaması
-    if signal.price > 10: score += 0.5
-    
-    # Kırılım açısı puanlaması
-    if signal.breakout_angle is not None:
-        angle_abs = abs(signal.breakout_angle)
-        if angle_abs > 30: score += 3.0
-        elif angle_abs > 15: score += 2.0
-        elif angle_abs > 5: score += 1.0
-        
-    # Mum formasyonu puanlaması (Ağırlık Artırıldı)
-    if signal.candle_formation:
-        if signal.candle_formation in [
-            "Bullish Engulfing", "Piercing Pattern", "Three White Soldiers"
-        ]:
-            score += 3.0
-        elif signal.candle_formation in [
-            "Hammer", "Inverted Hammer"
-        ]:
-            score += 2.0
-        elif signal.candle_formation in [
-            "Bearish Engulfing", "Dark Cloud Cover", "Three Black Crows"
-        ]:
-            score += 3.0
-        elif signal.candle_formation == "Doji":
-            score += 1.0
-            
-    # StochRSI puanlaması (Ağırlık Artırıldı)
-    if signal.stochrsi_k is not None and signal.stochrsi_d is not None:
-        if signal.direction == "BULLISH" and signal.stochrsi_k > signal.stochrsi_d and signal.stochrsi_k < 20:
-            score += 2.0
-        elif signal.direction == "BEARISH" and signal.stochrsi_k < signal.stochrsi_d and signal.stochrsi_k > 80:
-            score += 2.0
-            
-    # Hareketli Ortalama Kesişimi (Ağırlık Artırıldı)
-    if signal.ma_cross:
-        if signal.direction == "BULLISH" and signal.ma_cross == "GOLDEN_CROSS":
-            score += 4.0
-        elif signal.direction == "BEARISH" and signal.ma_cross == "DEATH_CROSS":
-            score += 4.0
-    
-    # --- YENİ EKLENEN BONUS PUANLAMA MEKANİZMASI ---
-    
-    # Golden Cross + Hacim Patlaması
-    if signal.ma_cross == "GOLDEN_CROSS" and signal.volume_ratio > 3.0:
-        score += 3.0
-        
-    # RSI Diverjans Kırılımı + Yüksek Hacim
-    if signal.breakout_angle is not None and abs(signal.breakout_angle) > 20 and signal.volume_ratio > 2.0:
-        if signal.direction == "BULLISH" and signal.rsi < 40:
-            score += 3.0
-        elif signal.direction == "BEARISH" and signal.rsi > 60:
-            score += 3.0
+def detect_ma_cross(close_series: pd.Series, short_period: int, long_period: int) -> Optional[str]:
+    if len(close_series) < max(short_period, long_period) + 1:
+        return None
+    short_ma = sma(close_series, short_period)
+    long_ma = sma(close_series, long_period)
+    if short_ma.iloc[-1] > long_ma.iloc[-1] and short_ma.iloc[-2] <= long_ma.iloc[-2]:
+        return "GOLDEN_CROSS"
+    elif short_ma.iloc[-1] < long_ma.iloc[-1] and short_ma.iloc[-2] >= long_ma.iloc[-2]:
+        return "DEATH_CROSS"
+    return None
 
-    # Güçlü Mum Formasyonu + MACD Kırılımı + Yüksek Hacim
-    if signal.candle_formation in ["Bullish Engulfing", "Three White Soldiers"] and \
-       signal.macd_signal == "BULLISH" and signal.volume_ratio > 2.5:
-        score += 4.0
+def calculate_single_timeframe_score(df: pd.DataFrame) -> Tuple[float, Dict]:
+    puan = 0
+    puan_detaylari = {}
     
-    # Tam tersi ayı sinyali için
-    if signal.candle_formation in ["Bearish Engulfing", "Three Black Crows"] and \
-       signal.macd_signal == "BEARISH" and signal.volume_ratio > 2.5:
-        score += 4.0
+    last_close = df['close'].iloc[-1]
+    
+    # 1. Trend Analizi (EMA)
+    ema_7 = df['ema_7'].iloc[-1]
+    ema_25 = df['ema_25'].iloc[-1]
+    if ema_7 > ema_25:
+        puan += 2
+        puan_detaylari['trend'] = 2
+    else:
+        puan -= 2
+        puan_detaylari['trend'] = -2
+    
+    # 2. RSI Analizi
+    rsi = df['rsi'].iloc[-1]
+    if rsi < 30:
+        puan += 2
+        puan_detaylari['rsi'] = 2
+    elif rsi > 70:
+        puan -= 2
+        puan_detaylari['rsi'] = -2
+    elif 30 <= rsi < 40:
+        puan += 1
+        puan_detaylari['rsi'] = 1
+    elif 60 < rsi <= 70:
+        puan -= 1
+        puan_detaylari['rsi'] = -1
+    else:
+        puan_detaylari['rsi'] = 0
+
+    # 3. MACD Analizi
+    macd_val = df['macd'].iloc[-1]
+    macd_signal = df['macd_signal'].iloc[-1]
+    if macd_val > macd_signal and macd_val > 0:
+        puan += 2
+        puan_detaylari['macd'] = 2
+    elif macd_val < macd_signal and macd_val < 0:
+        puan -= 2
+        puan_detaylari['macd'] = -2
+    elif macd_val > macd_signal:
+        puan += 1
+        puan_detaylari['macd'] = 1
+    elif macd_val < macd_signal:
+        puan -= 1
+        puan_detaylari['macd'] = -1
+    else:
+        puan_detaylari['macd'] = 0
+    
+    # 4. StochRSI Analizi
+    stoch_rsi = df['stoch_rsi'].iloc[-1]
+    if stoch_rsi < 20:
+        puan += 1
+        puan_detaylari['stoch_rsi'] = 1
+    elif stoch_rsi > 80:
+        puan -= 1
+        puan_detaylari['stoch_rsi'] = -1
+    else:
+        puan_detaylari['stoch_rsi'] = 0
+
+    # 5. Bollinger Bands Analizi
+    bb_upper = df['bb_upper'].iloc[-1]
+    bb_lower = df['bb_lower'].iloc[-1]
+    if last_close < bb_lower:
+        puan += 1
+        puan_detaylari['bollinger'] = 1
+    elif last_close > bb_upper:
+        puan -= 1
+        puan_detaylari['bollinger'] = -1
+    else:
+        puan_detaylari['bollinger'] = 0
+
+    # 6. ADX Analizi
+    adx = df['adx'].iloc[-1]
+    if adx > 25:
+        adx_puani = 1 if puan > 0 else -1
+        puan += adx_puani
+        puan_detaylari['adx'] = adx_puani
+    else:
+        puan_detaylari['adx'] = 0
+
+    # 7. Hacim ve Volatilite Analizi
+    avg_volume_20 = df['volume'].rolling(window=20).mean().iloc[-1]
+    volume_ratio = df['volume'].iloc[-1] / avg_volume_20 if avg_volume_20 > 0 else 1
+
+    avg_atr_20 = df['atr'].rolling(window=20).mean().iloc[-1]
+    current_atr = df['atr'].iloc[-1]
+
+    if volume_ratio > 2.0 and current_atr > avg_atr_20:
+        volume_puani = 1 if puan > 0 else -1
+        puan += volume_puani
+        puan_detaylari['volume'] = volume_puani
+    else:
+        puan_detaylari['volume'] = 0
         
-    return float(max(0.0, min(10.0, score)))
+    return puan, puan_detaylari
 
 # --- Veri Çekme & Analiz ---
 def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -570,126 +559,169 @@ def fetch_history(symbol: str, yf_interval: str, period: str) -> pd.DataFrame:
     df = stock.history(interval=yf_interval, period=period, auto_adjust=False)
     return df
 
-def classify_bb_position(price: float, upper: float, lower: float, near_pct: float) -> str:
-    if price >= upper: return "UPPER"
-    if price <= lower: return "LOWER"
-    band_range = upper - lower if upper > lower else 0
-    if band_range > 0:
-        if price >= upper - band_range * near_pct:
-            return "NEAR_UPPER"
-        if price <= lower + band_range * near_pct:
-            return "NEAR_LOWER"
-    return "MIDDLE"
+class TeknikAnaliz:
+    @staticmethod
+    def get_indicators(df: pd.DataFrame):
+        """ta kütüphanesini kullanarak göstergeleri hesaplar (sınıf tabanlı API)"""
+        if len(df) < 30: # StochRSI ve ADX için minimum veri sayısını artır
+            raise ValueError("Hesaplama için yetersiz veri noktası.")
+            
+        close = df['close']
+        high = df['high']
+        low = df['low']
 
-def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
+        # RSI
+        rsi_ind = RSIIndicator(close=close)
+        df['rsi'] = rsi_ind.rsi()
+            
+        # StochRSI
+        stoch_rsi_ind = StochRSIIndicator(close=close)
+        df['stoch_rsi'] = stoch_rsi_ind.stochrsi()
+
+        # MACD
+        macd_ind = MACD(close=close)
+        df['macd'] = macd_ind.macd()
+        df['macd_signal'] = macd_ind.macd_signal()
+
+        # Bollinger
+        bb = BollingerBands(close=close)
+        df['bb_upper'] = bb.bollinger_hband()
+        df['bb_middle'] = bb.bollinger_mavg()
+        df['bb_lower'] = bb.bollinger_lband()
+
+        # EMA'lar
+        df['ema_7'] = EMAIndicator(close=close, window=7).ema_indicator()
+        df['ema_25'] = EMAIndicator(close=close, window=25).ema_indicator()
+
+        # ATR (avg_true_range yerine)
+        atr_ind = AverageTrueRange(high=high, low=low, close=close, window=20)
+        df['atr'] = atr_ind.average_true_range().replace(0, np.nan)
+            
+        # ADX
+        adx_ind = ADXIndicator(high=high, low=low, close=close, window=14)
+        df['adx'] = adx_ind.adx()
+        
+        return df
+
+def fetch_and_analyze_data(symbol: str) -> Optional[SignalInfo]:
     try:
         yf_symbol = f"{symbol}.IS"
-        if timeframe == '1d':
-            base_interval, period = '1d', '730d'
-            df = fetch_history(yf_symbol, base_interval, period)
-            df = _standardize_df(df)
-        elif timeframe == '1h':
-            base_interval, period = '1h', '180d'
-            df = fetch_history(yf_symbol, base_interval, period)
-            df = _standardize_df(df)
-        elif timeframe == '4h':
-            base_interval, period = '1h', '180d'
-            raw = fetch_history(yf_symbol, base_interval, period)
-            if raw is None or raw.empty: return None
-            raw = _standardize_df(raw)
-            df = _resample_ohlcv(raw, '4h')
-        elif timeframe == '15m':
-            base_interval, period = '15m', '60d'
-            df = fetch_history(yf_symbol, base_interval, period)
-            df = _standardize_df(df)
-        else:
-            return None
-
-        if df is None or df.empty or len(df) < max(200, MA_LONG, RSI_LEN + STOCHRSI_PERIOD):
-            return None
-
-        df = df.dropna().tail(max(300, MA_LONG + 10))
-
-        last_close = float(df['close'].iloc[-1])
-        last_vol = float(df['volume'].iloc[-1])
         
-        # SIKI FİLTRELER: Fiyat ve hacim kontrolü
-        if last_close < MIN_PRICE or last_close * last_vol < MIN_VOLUME_TRY:
+        # Çoklu zaman dilimleri için verileri çek ve analiz et
+        signal_scores_by_tf = {}
+        data_by_tf = {}
+        
+        for tf, params in ZAMAN_DILIMLERI.items():
+            if tf == '1d':
+                base_interval, period = '1d', f"{params['limit']}d"
+                df = fetch_history(yf_symbol, base_interval, period)
+                df = _standardize_df(df)
+            elif tf == '1h':
+                base_interval, period = '1h', f"{params['limit']//2}d"
+                df = fetch_history(yf_symbol, base_interval, period)
+                df = _standardize_df(df)
+            elif tf == '4h':
+                base_interval, period = '1h', f"{params['limit']}d"
+                raw = fetch_history(yf_symbol, base_interval, period)
+                if raw is None or raw.empty: continue
+                raw = _standardize_df(raw)
+                df = _resample_ohlcv(raw, '4h')
+            elif tf == '15m':
+                base_interval, period = '15m', f"{params['limit']//2}d"
+                df = fetch_history(yf_symbol, base_interval, period)
+                df = _standardize_df(df)
+            else:
+                continue
+        
+            if df is None or df.empty or len(df) < 30:
+                continue
+
+            df = df.dropna().tail(params['limit'])
+            
+            # SIKI FİLTRELER: Fiyat ve hacim kontrolü
+            last_close = float(df['close'].iloc[-1])
+            last_vol = float(df['volume'].iloc[-1])
+            if last_close < MIN_PRICE or last_close * last_vol < MIN_VOLUME_TRY:
+                continue
+                
+            df_indicators = TeknikAnaliz.get_indicators(df.copy())
+            df_indicators = df_indicators.ffill().bfill() # NaN değerleri doldur
+
+            score, details = calculate_single_timeframe_score(df_indicators)
+            signal_scores_by_tf[tf] = score
+            data_by_tf[tf] = df_indicators
+
+        if not signal_scores_by_tf:
             return None
-
-        close, volume = df["close"], df["volume"]
+            
+        # Çoklu zaman dilimi puanı hesaplama
+        total_score = 0
+        for tf, score in signal_scores_by_tf.items():
+            agirlik = ZAMAN_DILIMLERI[tf]['agirlik']
+            total_score += score * agirlik
+            
+        # Yön belirleme (Çoğunluk puanına göre)
+        direction = "BULLISH" if total_score > 0 else "BEARISH"
+        
+        # En detaylı TF (genelde 15m) için ek bilgiler
+        tf_to_report = '15m' if '15m' in data_by_tf else next(iter(data_by_tf))
+        df_report = data_by_tf[tf_to_report]
+        
+        # Eski analizin ek özellikleri
+        close = df_report['close']
         rsi_series = rsi_from_close(close, RSI_LEN)
-        rsi_ema = ema(rsi_series, RSI_EMA_LEN)
-        macd_line, macd_sig, macd_hist = calculate_macd(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-        bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(close, BB_PERIOD, BB_MULT)
-
-        volume_sma = sma(volume, 20)
-        current_volume = volume.iloc[-1]
-        avg_volume = volume_sma.iloc[-1]
-        volume_ratio = float(current_volume / avg_volume) if (avg_volume and avg_volume > 0) else 1.0
-
         highs_idx, lows_idx = find_pivots(rsi_series, PIVOT_PERIOD, PIVOT_PERIOD)
         now_i = len(rsi_series) - 1
         bull_break, bear_break, breakout_angle = detect_breakouts(rsi_series, highs_idx, lows_idx, now_i)
-
-        current_rsi, current_rsi_ema = float(rsi_series.iloc[now_i]), float(rsi_ema.iloc[now_i])
-        current_price = float(close.iloc[-1])
-
-        macd_signal_str = "NEUTRAL"
-        if len(macd_hist) > 1:
-            if macd_hist.iloc[-1] > 0 and macd_hist.iloc[-2] <= 0: macd_signal_str = "BULLISH"
-            elif macd_hist.iloc[-1] < 0 and macd_hist.iloc[-2] >= 0: macd_signal_str = "BEARISH"
-
-        is_bull_signal = bull_break or (macd_signal_str == "BULLISH" and current_rsi < 50)
-        is_bear_signal = bear_break or (macd_signal_str == "BEARISH" and current_rsi > 50)
-
-        if not (is_bull_signal or is_bear_signal): return None
-        if volume_ratio < MIN_VOLUME_RATIO: return None
-
-        bb_pos = classify_bb_position(
-            current_price,
-            float(bb_upper.iloc[-1]),
-            float(bb_lower.iloc[-1]),
-            BB_NEAR_PCT
-        )
         
-        direction = "BULLISH" if is_bull_signal else "BEARISH"
-        volume_try = current_price * current_volume
-        candle_form = detect_candle_formation(df)
-        stochrsi_k, stochrsi_d = calculate_stoch_rsi(rsi_series, STOCHRSI_PERIOD, STOCHRSI_K, STOCHRSI_D)
+        candle_form = detect_candle_formation(df_report)
         ma_cross_type = detect_ma_cross(close, MA_SHORT, MA_LONG)
 
+        final_signal_score = (10 + total_score) / 2 # Puanı 0-10 arasına ölçekle
+        final_signal_score = max(0, min(10, final_signal_score))
+        
+        if final_signal_score < MIN_MULTI_TF_SCORE:
+            return None
+        
+        # Hacim kontrolü (Ana zaman diliminde)
+        avg_volume_20 = df_report['volume'].rolling(window=20).mean().iloc[-1]
+        volume_ratio = df_report['volume'].iloc[-1] / avg_volume_20 if avg_volume_20 > 0 else 1
+        if volume_ratio < MIN_VOLUME_RATIO:
+            return None
+
+        # Sinyal Yönü Kontrolü
+        if direction == "BULLISH" and (final_signal_score < 7.5 or (df_report['macd'].iloc[-1] < df_report['macd_signal'].iloc[-1])):
+            return None
+        if direction == "BEARISH" and (final_signal_score < 7.5 or (df_report['macd'].iloc[-1] > df_report['macd_signal'].iloc[-1])):
+            return None
+        
+        current_price = float(df_report['close'].iloc[-1])
+        volume_try = current_price * float(df_report['volume'].iloc[-1])
+        
+        bb_pos = "" # Artık ana puanlamada kullanılmadığı için boş bırakılabilir
+        
         base_signal = SignalInfo(
-            symbol=symbol, timeframe=timeframe, direction=direction, price=current_price,
-            rsi=current_rsi, rsi_ema=current_rsi_ema, volume_ratio=volume_ratio,
-            volume_try=volume_try, macd_signal=macd_signal_str, bb_position=bb_pos,
-            strength_score=0.0, timestamp=df.index[-1].strftime('%Y-%m-%d %H:%M'),
-            breakout_angle=breakout_angle, candle_formation=candle_form,
-            multi_tf_score=0.0, stochrsi_k=stochrsi_k, stochrsi_d=stochrsi_d, ma_cross=ma_cross_type
+            symbol=symbol, timeframe=tf_to_report, direction=direction, price=current_price,
+            rsi=float(df_report['rsi'].iloc[-1]),
+            stoch_rsi=float(df_report['stoch_rsi'].iloc[-1]),
+            macd_val=float(df_report['macd'].iloc[-1]),
+            macd_signal_val=float(df_report['macd_signal'].iloc[-1]),
+            ema_7=float(df_report['ema_7'].iloc[-1]),
+            ema_25=float(df_report['ema_25'].iloc[-1]),
+            adx=float(df_report['adx'].iloc[-1]),
+            volume_ratio=volume_ratio,
+            volume_try=volume_try,
+            bb_position=bb_pos,
+            strength_score=final_signal_score,
+            timestamp=df_report.index[-1].strftime('%Y-%m-%d %H:%M'),
+            breakout_angle=breakout_angle,
+            candle_formation=candle_form,
+            ma_cross=ma_cross_type
         )
-        base_signal.strength_score = calculate_signal_strength(base_signal)
         
-        # YENİ EKLENEN SIKI FİLTRELER
-        # 1. Mum formasyonu yoksa ve puanı düşükse ele
-        if not base_signal.candle_formation and base_signal.strength_score < 7.5:
-            return None
-        
-        # 2. Ana trendin tersine ve gücü zayıfsa ele
-        if (base_signal.direction == "BULLISH" and base_signal.ma_cross == "DEATH_CROSS" and base_signal.strength_score < 8.0) or \
-           (base_signal.direction == "BEARISH" and base_signal.ma_cross == "GOLDEN_CROSS" and base_signal.strength_score < 8.0):
-            return None
-        
-        # 3. MACD veya RSI kırılımı sinyali yoksa hemen ele
-        if base_signal.macd_signal == "NEUTRAL" and base_signal.breakout_angle is None:
-            return None
-            
-        # 4. Fiyat konsolidasyon bölgesindeyken sinyalleri ele
-        if base_signal.rsi > 40 and base_signal.rsi < 60 and base_signal.strength_score < 8.5:
-            return None
-            
         return base_signal
     except Exception as e:
-        logger.error(f"Analysis error {symbol} {timeframe}: {e}")
+        logger.error(f"Analysis error {symbol}: {e}")
         return None
 
 # --- Sinyal Veritabanı (Disk Tabanlı) ---
@@ -764,8 +796,9 @@ async def send_enhanced_alert(signal: SignalInfo):
         f"• Zaman Dilimi: <b>{signal.timeframe.upper()}</b>\n"
         f"• Son Fiyat: <b>{signal.price:.2f} ₺</b>\n"
         f"• Sinyal Gücü: <b>{signal.strength_score:.1f}/10</b>\n"
-        f"• Hacim Oranı: {signal.volume_ratio:.1f}x (Normalin <b>{signal.volume_ratio:.1f} katı</b>)\n"
-        f"• MACD: {signal.macd_signal}\n"
+        f"• Hacim Oranı: {signal.volume_ratio:.1f}x\n"
+        f"• MACD Durumu: {signal.macd_val:.2f} / {signal.macd_signal_val:.2f}\n"
+        f"• RSI: {signal.rsi:.2f}\n"
     )
     
     if signal.candle_formation:
@@ -775,10 +808,10 @@ async def send_enhanced_alert(signal: SignalInfo):
         message += f"• RSI Kırılımı: <b>{signal.breakout_angle:.1f}°</b>\n"
 
     if signal.ma_cross:
-        if signal.ma_cross == "GOLDEN_CROSS":
-            message += f"• Trend Değişimi: <b>{signal.ma_cross}</b>\n"
-        else:
-            message += f"• Trend Değişimi: <b>{signal.ma_cross}</b>\n"
+        message += f"• Trend Değişimi: <b>{signal.ma_cross}</b>\n"
+    
+    if signal.adx > 25:
+        message += f"• Trend Gücü (ADX): <b>Güçlü Trend ({signal.adx:.1f})</b>\n"
 
     message += f"\n{trend_emoji} {signal.symbol} için güçlü bir {signal.direction} sinyali oluştu."
     
@@ -789,11 +822,10 @@ async def send_enhanced_alert(signal: SignalInfo):
 async def scan_stock_async(symbol: str) -> List[SignalInfo]:
     """Her bir hisse senedi için asenkron tarama ve analiz yapar."""
     signals: List[SignalInfo] = []
-    for tf in TIMEFRAMES:
-        signal = await asyncio.to_thread(fetch_and_analyze_data, symbol, tf)
-        if signal and signal.strength_score >= MIN_SIGNAL_SCORE:
-            signals.append(signal)
-            logger.info(f"🎉 Sinyal Bulundu: {symbol} - {tf} - Güç: {signal.strength_score:.1f}")
+    signal = await asyncio.to_thread(fetch_and_analyze_data, symbol)
+    if signal and signal.strength_score >= MIN_SIGNAL_SCORE:
+        signals.append(signal)
+        logger.info(f"🎉 Sinyal Bulundu: {symbol} - Güç: {signal.strength_score:.1f}")
     return signals
 
 async def run_scan_async():
