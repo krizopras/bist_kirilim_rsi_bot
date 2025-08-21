@@ -1,50 +1,31 @@
 services:
   - type: web
-    name: rsi-bot-bist
+    name: bist-scanner-bot
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
-    plan: starter
-    healthCheckPath: /health
+    buildCommand: |
+      pip install -r requirements.txt
+    startCommand: |
+      python main.py
     envVars:
-      # Bot Configuration
-      - key: TICKERS
-        value: THYAO,SAHOL,ASTOR,AKBNK,SISE,BIMAS,EREGL,KCHOL
-      - key: TIMEFRAMES
-        value: 1h,4h,1d
-      - key: CHECK_EVERY_MIN
-        value: 15
-      - key: MIN_PRICE
-        value: 1.0
-      - key: MIN_VOLUME_TRY
-        value: 1000000
-      - key: MIN_SIGNAL_SCORE
-        value: 8.0
-      
-      # TA Parameters
-      - key: RSI_LEN
-        value: 22
-      - key: MACD_FAST
-        value: 12
-      - key: MACD_SLOW
-        value: 26
-      - key: MACD_SIGNAL
-        value: 9
-      - key: MA_SHORT
-        value: 50
-      - key: MA_LONG
-        value: 200
-      - key: MIN_VOLUME_RATIO
-        value: 1.5
-
-      # Logging
-      - key: LOG_LEVEL
-        value: INFO
-      
-      # Secret variables (add these manually in Render dashboard)
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
       - key: COLLECTAPI_KEY
         sync: false
+      - key: SCAN_MODE
+        value: ALL
+      - key: CUSTOM_TICKERS
+        value: ""
+      - key: CHECK_EVERY_MIN
+        value: "15"
+      - key: TIMEFRAMES
+        value: "1d,4h,1h,15m"
+      - key: MIN_PRICE
+        value: "1.0"
+      - key: MIN_VOLUME_TRY
+        value: "1000000"
+      - key: MIN_SIGNAL_SCORE
+        value: "8.0"
+      - key: LOG_LEVEL
+        value: "INFO"
