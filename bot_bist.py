@@ -148,10 +148,11 @@ CHECK_EVERY_MIN = int(os.getenv("CHECK_EVERY_MIN", "15"))
 TIMEFRAMES = [t.strip() for t in os.getenv("TIMEFRAMES", "").split(',') if t.strip()] or ["15m", "1h", "4h", "1d"]
 MIN_PRICE = float(os.getenv("MIN_PRICE", "1.0"))
 MIN_VOLUME_TRY = float(os.getenv("MIN_VOLUME_TRY", "5000000")) 
-MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "2.0")) 
-RSI_LEN = int(os.getenv("RSI_LEN", "22"))
-RSI_EMA_LEN = int(os.getenv("RSI_EMA", "66"))
-PIVOT_PERIOD = int(os.getenv("PIVOT_PERIOD", "10"))
+# Ayarlar sıkılaştırıldı
+MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "3.0")) 
+RSI_LEN = int(os.getenv("RSI_LEN", "30"))
+RSI_EMA_LEN = int(os.getenv("RSI_EMA", "99"))
+PIVOT_PERIOD = int(os.getenv("PIVOT_PERIOD", "15"))
 MACD_FAST = int(os.getenv("MACD_FAST", "12"))
 MACD_SLOW = int(os.getenv("MACD_SLOW", "26"))
 MACD_SIGNAL = int(os.getenv("MACD_SIGNAL", "9"))
@@ -164,7 +165,7 @@ STOCHRSI_D = int(os.getenv("STOCHRSI_D", "3"))
 MA_SHORT = int(os.getenv("MA_SHORT", "50"))
 MA_LONG = int(os.getenv("MA_LONG", "200"))
 # Çok güçlü sinyaller için minimum puan eşiği yükseltildi
-MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "12.0")) 
+MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "15.0")) 
 
 LAST_SCAN_TIME: Optional[dt.datetime] = None
 START_TIME = time.time()
