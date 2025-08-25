@@ -355,10 +355,35 @@ def detect_breakouts(rsi: pd.Series, highs_idx: List[int], lows_idx: List[int], 
                 breakout_angle = math.degrees(math.atan(m2))
     return bull_break, bear_break, breakout_angle
 
+# --- Yeni Mum Formasyonu Fonksiyonları ---
 def is_doji(open_p, close_p, high_p, low_p, body_size_threshold=0.1):
     body = abs(close_p - open_p)
     full_range = high_p - low_p
     return full_range > 0 and body < full_range * body_size_threshold
+
+def is_hammer(open_p, close_p, low_p, high_p):
+    body = abs(close_p - open_p)
+    lower_shadow = min(open_p, close_p) - low_p
+    upper_shadow = high_p - max(open_p, close_p)
+    return lower_shadow > 2 * body and upper_shadow < body
+
+def is_inverted_hammer(open_p, close_p, low_p, high_p):
+    body = abs(close_p - open_p)
+    lower_shadow = min(open_p, close_p) - low_p
+    upper_shadow = high_p - max(open_p, close_p)
+    return upper_shadow > 2 * body and lower_shadow < body
+
+def is_hanging_man(open_p, close_p, low_p, high_p):
+    body = abs(close_p - open_p)
+    lower_shadow = min(open_p, close_p) - low_p
+    upper_shadow = high_p - max(open_p, close_p)
+    return lower_shadow > 2 * body and upper_shadow < body
+
+def is_shooting_star(open_p, close_p, low_p, high_p):
+    body = abs(close_p - open_p)
+    lower_shadow = min(open_p, close_p) - low_p
+    upper_shadow = high_p - max(open_p, close_p)
+    return upper_shadow > 2 * body and lower_shadow < body
 
 def is_bullish_engulfing(prev_c, last_c):
     return (
@@ -375,18 +400,6 @@ def is_bearish_engulfing(prev_c, last_c):
         last_c['close'] < prev_c['open'] and
         last_c['open'] > prev_c['close']
     )
-
-def is_hammer(open_p, close_p, low_p, high_p):
-    body = abs(close_p - open_p)
-    lower_shadow = min(open_p, close_p) - low_p
-    upper_shadow = high_p - max(open_p, close_p)
-    return lower_shadow > 2 * body and upper_shadow < body
-
-def is_inverted_hammer(open_p, close_p, low_p, high_p):
-    body = abs(close_p - open_p)
-    lower_shadow = min(open_p, close_p) - low_p
-    upper_shadow = high_p - max(open_p, close_p)
-    return upper_shadow > 2 * body and lower_shadow < body
 
 def is_piercing_pattern(df):
     if len(df) < 2: return False
@@ -408,6 +421,40 @@ def is_dark_cloud_cover(df):
         last_c['close'] < (prev_c['open'] + prev_c['close']) / 2
     )
 
+def is_bullish_harami(prev_c, last_c):
+    return (
+        prev_c['close'] < prev_c['open'] and
+        last_c['close'] > last_c['open'] and
+        last_c['low'] > prev_c['low'] and
+        last_c['high'] < prev_c['high']
+    )
+
+def is_bearish_harami(prev_c, last_c):
+    return (
+        prev_c['close'] > prev_c['open'] and
+        last_c['close'] < last_c['open'] and
+        last_c['low'] > prev_c['low'] and
+        last_c['high'] < prev_c['high']
+    )
+
+def is_tweezer_bottoms(df):
+    if len(df) < 2: return False
+    prev_c, last_c = df.iloc[-2], df.iloc[-1]
+    return (
+        abs(prev_c['low'] - last_c['low']) / last_c['low'] < 0.001 and
+        prev_c['close'] < prev_c['open'] and
+        last_c['close'] > last_c['open']
+    )
+
+def is_tweezer_tops(df):
+    if len(df) < 2: return False
+    prev_c, last_c = df.iloc[-2], df.iloc[-1]
+    return (
+        abs(prev_c['high'] - last_c['high']) / last_c['high'] < 0.001 and
+        prev_c['close'] > prev_c['open'] and
+        last_c['close'] < last_c['open']
+    )
+
 def is_three_white_soldiers(df):
     if len(df) < 3: return False
     c1, c2, c3 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
@@ -426,21 +473,57 @@ def is_three_black_crows(df):
         c3['open'] <= c2['open'] and c3['close'] <= c2['close']
     )
 
+def is_morning_star(df):
+    if len(df) < 3: return False
+    c1, c2, c3 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+    return (
+        c1['close'] < c1['open'] and c1['open'] - c1['close'] > abs(c1['high'] - c1['low']) * 0.6 and # Long red
+        abs(c2['open'] - c2['close']) < abs(c2['high'] - c2['low']) * 0.4 and # Small body
+        c3['close'] > c3['open'] and c3['close'] > (c1['open'] + c1['close']) / 2 # Long green, closes above midpoint of first candle
+    )
+
+def is_evening_star(df):
+    if len(df) < 3: return False
+    c1, c2, c3 = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+    return (
+        c1['close'] > c1['open'] and c1['close'] - c1['open'] > abs(c1['high'] - c1['low']) * 0.6 and # Long green
+        abs(c2['open'] - c2['close']) < abs(c2['high'] - c2['low']) * 0.4 and # Small body
+        c3['close'] < c3['open'] and c3['close'] < (c1['open'] + c1['close']) / 2 # Long red, closes below midpoint of first candle
+    )
+
 def detect_candle_formation(df: pd.DataFrame) -> Optional[str]:
     if len(df) < 3:
         return None
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
     open_p, high_p, low_p, close_p = last_candle['open'], last_candle['high'], last_candle['low'], last_candle['close']
+
+    # 3 Mum Formasyonları (Önce kontrol edilir, çünkü daha güçlü sinyallerdir)
     if is_three_white_soldiers(df): return "Three White Soldiers"
     if is_three_black_crows(df): return "Three Black Crows"
+    if is_morning_star(df): return "Morning Star"
+    if is_evening_star(df): return "Evening Star"
+    
+    # 2 Mum Formasyonları
     if is_bullish_engulfing(prev_candle, last_candle): return "Bullish Engulfing"
     if is_bearish_engulfing(prev_candle, last_candle): return "Bearish Engulfing"
     if is_piercing_pattern(df): return "Piercing Pattern"
     if is_dark_cloud_cover(df): return "Dark Cloud Cover"
+    if is_bullish_harami(prev_candle, last_candle): return "Bullish Harami"
+    if is_bearish_harami(prev_candle, last_candle): return "Bearish Harami"
+    if is_tweezer_bottoms(df): return "Tweezer Bottoms"
+    if is_tweezer_tops(df): return "Tweezer Tops"
+
+    # Tek Mum Formasyonları
+    # Bu formasyonlar sadece belirli trendlerde anlamlı olduğu için, trend yönü ile birlikte yorumlanır.
+    # Bu mantık aşağıda, ana analiz kısmında uygulanacak.
+    # Burada sadece formasyonu tespit ediyoruz.
+    if is_doji(open_p, close_p, high_p, low_p): return "Doji"
     if is_hammer(open_p, close_p, low_p, high_p): return "Hammer"
     if is_inverted_hammer(open_p, close_p, low_p, high_p): return "Inverted Hammer"
-    if is_doji(open_p, close_p, high_p, low_p): return "Doji"
+    if is_hanging_man(open_p, close_p, low_p, high_p): return "Hanging Man"
+    if is_shooting_star(open_p, close_p, low_p, high_p): return "Shooting Star"
+
     return None
 
 def calculate_tsi(close: pd.Series, long_period: int = 25, short_period: int = 13, signal_period: int = 13) -> pd.Series:
@@ -505,7 +588,6 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
         score += 1.5
     elif signal.timeframe == '4h':
         score += 0.5
-    # 1d için ekstra bonus yok
     
     # RSI puanlaması
     if signal.direction == "BULLISH":
@@ -516,7 +598,7 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
         elif signal.rsi > 50: score += 1.0
         
     # Hacim puanlaması (Ağırlık Artırıldı)
-    if signal.volume_ratio > 4.0: score += 4.0 # Çok yüksek hacim
+    if signal.volume_ratio > 4.0: score += 4.0 
     elif signal.volume_ratio > 3.0: score += 3.0
     elif signal.volume_ratio > 2.0: score += 2.0
     elif signal.volume_ratio > 1.5: score += 1.0
@@ -547,22 +629,22 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
         elif angle_abs > 15: score += 2.0
         elif angle_abs > 5: score += 1.0
         
-    # Mum formasyonu puanlaması (Ağırlık Artırıldı)
+    # Mum formasyonu puanlaması (YENİ)
     if signal.candle_formation:
-        if signal.candle_formation in [
-            "Bullish Engulfing", "Piercing Pattern", "Three White Soldiers"
-        ]:
+        if signal.candle_formation in ["Morning Star", "Three White Soldiers", "Bullish Engulfing"]:
+            score += 4.0
+        elif signal.candle_formation in ["Hammer", "Piercing Pattern", "Bullish Harami", "Tweezer Bottoms"]:
             score += 3.0
-        elif signal.candle_formation in [
-            "Hammer", "Inverted Hammer"
-        ]:
+        elif signal.candle_formation in ["Inverted Hammer"]:
             score += 2.0
-        elif signal.candle_formation in [
-            "Bearish Engulfing", "Dark Cloud Cover", "Three Black Crows"
-        ]:
+        
+        # Ayı Formasyonları
+        if signal.candle_formation in ["Evening Star", "Three Black Crows", "Bearish Engulfing"]:
+            score += 4.0
+        elif signal.candle_formation in ["Shooting Star", "Dark Cloud Cover", "Bearish Harami", "Tweezer Tops"]:
             score += 3.0
-        elif signal.candle_formation == "Doji":
-            score += 1.0
+        elif signal.candle_formation in ["Hanging Man"]:
+            score += 2.0
             
     # StochRSI puanlaması (Ağırlık Artırıldı)
     if signal.stochrsi_k is not None and signal.stochrsi_d is not None:
@@ -578,29 +660,7 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
         elif signal.direction == "BEARISH" and signal.ma_cross == "DEATH_CROSS":
             score += 4.0
     
-    # --- YENİ KESİŞME STRATEJİSİ PUANLAMASI ---
-    # Golden Cross + Hacim Patlaması
-    if signal.ma_cross == "GOLDEN_CROSS" and signal.volume_ratio > 3.0:
-        score += 3.0
-        
-    # RSI Diverjans Kırılımı + Yüksek Hacim
-    if signal.breakout_angle is not None and abs(signal.breakout_angle) > 20 and signal.volume_ratio > 2.0:
-        if signal.direction == "BULLISH" and signal.rsi < 40:
-            score += 3.0
-        elif signal.direction == "BEARISH" and signal.rsi > 60:
-            score += 3.0
-
-    # Güçlü Mum Formasyonu + MACD Kırılımı + Yüksek Hacim
-    if signal.candle_formation in ["Bullish Engulfing", "Three White Soldiers"] and \
-       signal.macd_signal == "BULLISH" and signal.volume_ratio > 2.5:
-        score += 4.0
-    
-    # Tam tersi ayı sinyali için
-    if signal.candle_formation in ["Bearish Engulfing", "Three Black Crows"] and \
-       signal.macd_signal == "BEARISH" and signal.volume_ratio > 2.5:
-        score += 4.0
-    
-    # TSI Uyumu (Yeşil kesişme kuralı)
+    # TSI Uyumu
     if signal.tsi_value is not None:
         if signal.direction == "BULLISH" and signal.tsi_value > 0:
             score += 2.0
@@ -612,16 +672,6 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
         score += 2.5
     elif signal.sar_status == 'BEARISH' and signal.direction == 'BEARISH':
         score += 2.5
-
-    # En Güçlü Sinyal: Kesişim + Uyum
-    if signal.ma_cross == "GOLDEN_CROSS" and signal.volume_ratio > 3.0:
-        if signal.tsi_value is not None and signal.sar_status == 'BULLISH' and signal.tsi_value > 0:
-            score += 5.0 # Çok güçlü bir bonus
-            
-    # Tersine sinyal için
-    if signal.ma_cross == "DEATH_CROSS" and signal.volume_ratio > 3.0:
-        if signal.tsi_value is not None and signal.sar_status == 'BEARISH' and signal.tsi_value < 0:
-            score += 5.0
         
     return float(max(0.0, min(10.0, score)))
 
@@ -828,6 +878,16 @@ async def scan_and_report():
                             summary_text += f"{tf}: <b>{status}</b> - "
                         message += f"\n\nZaman Dilimi Özeti:\n{summary_text.strip(' - ')}"
                         
+                        # Yeni eklenen teknik gösterge detayları
+                        message += f"\n\n<b>Detaylı Analiz:</b>"
+                        message += f"\n• <b>RSI:</b> {highest_score_signal.rsi:.2f}"
+                        message += f"\n• <b>MACD Sinyali:</b> {highest_score_signal.macd_signal}"
+                        message += f"\n• <b>Hacim Oranı:</b> {highest_score_signal.volume_ratio:.2f}x"
+                        message += f"\n• <b>TSI:</b> {highest_score_signal.tsi_value:.2f}"
+                        message += f"\n• <b>SAR:</b> {highest_score_signal.sar_status}"
+                        if highest_score_signal.candle_formation:
+                             message += f"\n• <b>Mum Formasyonu:</b> {highest_score_signal.candle_formation}"
+
                         found_signals.append(highest_score_signal)
                         DAILY_SIGNALS[symbol] = asdict(highest_score_signal)
                         await send_telegram(message)
