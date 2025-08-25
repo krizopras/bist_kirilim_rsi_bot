@@ -20,7 +20,7 @@ import json
 import time
 from datetime import timezone, timedelta
 from typing import List, Tuple, Dict, Optional, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
@@ -145,10 +145,10 @@ else:
     TICKERS = ALL_BIST_STOCKS
 
 CHECK_EVERY_MIN = int(os.getenv("CHECK_EVERY_MIN", "15"))
-TIMEFRAMES = [t.strip() for t in os.getenv("TIMEFRAMES", "").split(',') if t.strip()] or ["1d", "4h", "1h", "15m"]
+TIMEFRAMES = [t.strip() for t in os.getenv("TIMEFRAMES", "").split(',') if t.strip()] or ["15m", "1h", "4h", "1d"]
 MIN_PRICE = float(os.getenv("MIN_PRICE", "1.0"))
-MIN_VOLUME_TRY = float(os.getenv("MIN_VOLUME_TRY", "5000000")) # DEĞİŞTİ!
-MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "2.0")) # DEĞİŞTİ!
+MIN_VOLUME_TRY = float(os.getenv("MIN_VOLUME_TRY", "5000000")) 
+MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "2.0")) 
 RSI_LEN = int(os.getenv("RSI_LEN", "22"))
 RSI_EMA_LEN = int(os.getenv("RSI_EMA", "66"))
 PIVOT_PERIOD = int(os.getenv("PIVOT_PERIOD", "10"))
@@ -163,7 +163,7 @@ STOCHRSI_K = int(os.getenv("STOCHRSI_K", "3"))
 STOCHRSI_D = int(os.getenv("STOCHRSI_D", "3"))
 MA_SHORT = int(os.getenv("MA_SHORT", "50"))
 MA_LONG = int(os.getenv("MA_LONG", "200"))
-MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "10.0")) # DEĞİŞTİ!
+MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "10.0")) 
 
 LAST_SCAN_TIME: Optional[dt.datetime] = None
 START_TIME = time.time()
@@ -189,7 +189,6 @@ class SignalInfo:
     stochrsi_k: Optional[float] = None
     stochrsi_d: Optional[float] = None
     ma_cross: Optional[str] = None
-    # YENİ EKLENENLER
     tsi_value: Optional[float] = None
     sar_status: Optional[str] = None
 
@@ -496,9 +495,17 @@ def calculate_sar(high: pd.Series, low: pd.Series, acceleration: float = 0.02, m
 
     return pd.Series(sar, index=high.index)
 
-
 def calculate_signal_strength(signal: SignalInfo) -> float:
     score = 5.0
+    
+    # Yeni Eklenen Zaman Dilimi Ağırlıklandırması
+    if signal.timeframe == '15m':
+        score += 2.5
+    elif signal.timeframe == '1h':
+        score += 1.5
+    elif signal.timeframe == '4h':
+        score += 0.5
+    # 1d için ekstra bonus yok
     
     # RSI puanlaması
     if signal.direction == "BULLISH":
@@ -752,217 +759,127 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
             tsi_value=float(tsi_series.iloc[-1]) if not tsi_series.empty else None,
             sar_status=sar_status
         )
+        
         base_signal.strength_score = calculate_signal_strength(base_signal)
-        
-        # YENİ EKLENEN SIKI FİLTRELER
-        # 1. Mum formasyonu yoksa ve puanı düşükse ele
-        if not base_signal.candle_formation and base_signal.strength_score < 7.5:
-            return None
-        
-        # 2. Ana trendin tersine ve gücü zayıfsa ele
-        if (base_signal.direction == "BULLISH" and base_signal.ma_cross == "DEATH_CROSS" and base_signal.strength_score < 8.0) or \
-           (base_signal.direction == "BEARISH" and base_signal.ma_cross == "GOLDEN_CROSS" and base_signal.strength_score < 8.0):
-            return None
-        
-        # 3. MACD veya RSI kırılımı sinyali yoksa hemen ele
-        if base_signal.macd_signal == "NEUTRAL" and base_signal.breakout_angle is None:
-            return None
-            
-        # 4. Fiyat konsolidasyon bölgesindeyken sinyalleri ele
-        if base_signal.rsi > 40 and base_signal.rsi < 60 and base_signal.strength_score < 8.5:
-            return None
-            
         return base_signal
+        
     except Exception as e:
-        logger.error(f"Analysis error {symbol} {timeframe}: {e}")
+        logger.warning(f"Error analyzing {symbol} on {timeframe}: {e}")
         return None
 
-# --- Sinyal Veritabanı (Disk Tabanlı) ---
-def get_signals_db_file():
-    """Günlük sinyal dosyası adı"""
-    today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
-    return f"signals_{today_str}.json"
-
-def load_daily_signals_from_disk():
-    """Disk tabanlı günlük sinyalleri yükle"""
-    global DAILY_SIGNALS
-    db_file = get_signals_db_file()
-    
-    if os.path.exists(db_file) and os.stat(db_file).st_size > 0:
-        try:
-            with open(db_file, 'r', encoding='utf-8') as f:
-                DAILY_SIGNALS = json.load(f)
-            logger.info(f"📂 {len(DAILY_SIGNALS)} günlük sinyal yüklendi")
-        except Exception as e:
-            logger.error(f"Günlük sinyaller yüklenemedi: {e}")
-            DAILY_SIGNALS = {}
+def get_signal_label(signal: Optional[SignalInfo]) -> str:
+    if not signal:
+        return "Nötr"
+    if signal.direction == "BULLISH":
+        return "AL"
     else:
-        DAILY_SIGNALS = {}
+        return "SAT"
 
-def save_daily_signals_to_disk():
-    """Günlük sinyalleri diske kaydet"""
-    db_file = get_signals_db_file()
-    try:
-        with open(db_file, 'w', encoding='utf-8') as f:
-            json.dump(DAILY_SIGNALS, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Günlük sinyaller kaydedilemedi: {e}")
-
-def is_signal_already_sent_today(symbol: str, direction: str) -> bool:
-    """Bugün bu hisse için bu yönde sinyal gönderildi mi? - Disk tabanlı kontrol"""
-    today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
-    signal_key = f"{symbol}_{direction}"
-    
-    if signal_key in DAILY_SIGNALS:
-        signal_date = DAILY_SIGNALS[signal_key].get('date', '')
-        if signal_date == today_str:
-            return True
-    
-    return False
-
-def save_daily_signal(signal: SignalInfo):
-    """Günlük sinyal veritabanına kaydet - Disk tabanlı"""
-    today_str = dt.datetime.now(IST_TZ).strftime("%Y-%m-%d")
-    signal_key = f"{signal.symbol}_{signal.direction}"
-    
-    DAILY_SIGNALS[signal_key] = {
-        'date': today_str,
-        'symbol': signal.symbol,
-        'direction': signal.direction,
-        'price': signal.price,
-        'timeframe': signal.timeframe,
-        'strength_score': signal.strength_score,
-        'timestamp': signal.timestamp,
-        'volume_ratio': signal.volume_ratio,
-        'sent_time': dt.datetime.now(IST_TZ).isoformat()
-    }
-    save_daily_signals_to_disk()
-    
-async def send_enhanced_alert(signal: SignalInfo):
-    """Gelişmiş sinyal uyarısını Telegram'a gönderir."""
-    emoji = "🟢" if signal.direction == "BULLISH" else "🔴"
-    trend_emoji = "📈" if signal.direction == "BULLISH" else "📉"
-    
-    message = (
-        f"<b>{emoji} Sinyal: {signal.symbol}.IS</b>\n\n"
-        f"• Yön: <b>{signal.direction}</b>\n"
-        f"• Zaman Dilimi: <b>{signal.timeframe.upper()}</b>\n"
-        f"• Son Fiyat: <b>{signal.price:.2f} ₺</b>\n"
-        f"• Sinyal Gücü: <b>{signal.strength_score:.1f}/10</b>\n"
-        f"• Hacim Oranı: {signal.volume_ratio:.1f}x (Normalin <b>{signal.volume_ratio:.1f} katı</b>)\n"
-        f"• MACD: {signal.macd_signal}\n"
-    )
-    
-    if signal.candle_formation:
-        message += f"• Mum Formasyonu: <b>{signal.candle_formation}</b>\n"
-    
-    if signal.breakout_angle:
-        message += f"• RSI Kırılımı: <b>{signal.breakout_angle:.1f}°</b>\n"
-
-    if signal.ma_cross:
-        if signal.ma_cross == "GOLDEN_CROSS":
-            message += f"• Trend Değişimi: <b>{signal.ma_cross}</b>\n"
-        else:
-            message += f"• Trend Değişimi: <b>{signal.ma_cross}</b>\n"
-    
-    if signal.tsi_value is not None:
-        message += f"• TSI: <b>{signal.tsi_value:.2f}</b>\n"
-    
-    if signal.sar_status:
-        message += f"• SAR Trendi: <b>{signal.sar_status}</b>\n"
-
-    message += f"\n{trend_emoji} {signal.symbol} için güçlü bir {signal.direction} sinyali oluştu."
-    
-    await send_telegram(message)
-    logger.info(f"✅ Telegram'a sinyal gönderildi: {signal.symbol} - {signal.direction} - {signal.strength_score:.1f}/10")
-
-# --- Ana Tarama Döngüsü ---
-async def scan_stock_async(symbol: str) -> List[SignalInfo]:
-    """Her bir hisse senedi için asenkron tarama ve analiz yapar."""
-    signals: List[SignalInfo] = []
-    for tf in TIMEFRAMES:
-        signal = await asyncio.to_thread(fetch_and_analyze_data, symbol, tf)
-        if signal and signal.strength_score >= MIN_SIGNAL_SCORE:
-            signals.append(signal)
-            logger.info(f"🎉 Sinyal Bulundu: {symbol} - {tf} - Güç: {signal.strength_score:.1f}")
-    return signals
-
-async def run_scan_async():
-    """Tüm hisseleri paralel olarak tarar."""
-    global LAST_SCAN_TIME
+async def scan_and_report():
+    global LAST_SCAN_TIME, DAILY_SIGNALS
     logger.info("⏳ BIST taraması başlıyor...")
-    
-    # Günlük sinyal veritabanını yükle
-    load_daily_signals_from_disk()
-
-    tasks = [scan_stock_async(ticker) for ticker in TICKERS]
-    
-    # Paralel işlem limiti belirleme
-    semaphore = asyncio.Semaphore(10) # Aynı anda 10 task çalıştırır
-    async def limited_scan(task):
-        async with semaphore:
-            return await task
-    
-    results = await asyncio.gather(*[limited_scan(t) for t in tasks])
-    
-    total_signals_found = 0
-    for signals_list in results:
-        for signal in signals_list:
-            if not is_signal_already_sent_today(signal.symbol, signal.direction):
-                await send_enhanced_alert(signal)
-                save_daily_signal(signal)
-                total_signals_found += 1
-    
     LAST_SCAN_TIME = dt.datetime.now(IST_TZ)
-    logger.info(f"✅ Tarama tamamlandı. Toplam bulunan yeni sinyal: {total_signals_found}")
 
-async def main_loop():
-    """Botun ana döngüsünü yönetir."""
-    first_run = True
-    while True:
+    if is_market_hours():
+        found_signals = []
+        with ThreadPoolExecutor(max_workers=os.cpu_count() * 2) as executor:
+            loop = asyncio.get_running_loop()
+            tasks = []
+            
+            for symbol in TICKERS:
+                tasks.append(loop.run_in_executor(executor, fetch_history, f"{symbol}.IS", "1d", "1y"))
+            
+            daily_dfs = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for i, symbol in enumerate(TICKERS):
+                df_daily = daily_dfs[i]
+                if isinstance(df_daily, Exception):
+                    logger.warning(f"Error fetching daily data for {symbol}: {df_daily}")
+                    continue
+                
+                # Çoklu zaman dilimi sinyal toplama
+                multi_tf_results = {}
+                for tf in TIMEFRAMES:
+                    signal = fetch_and_analyze_data(symbol, tf)
+                    if signal:
+                        multi_tf_results[tf] = signal
+                
+                if multi_tf_results:
+                    highest_score_signal = max(multi_tf_results.values(), key=lambda s: s.strength_score)
+                    
+                    if highest_score_signal.direction == "BULLISH" and highest_score_signal.strength_score >= MIN_SIGNAL_SCORE:
+                        
+                        # Günlük sinyal kontrolü
+                        today_date_str = dt.datetime.now(IST_TZ).strftime('%Y-%m-%d')
+                        if symbol in DAILY_SIGNALS and DAILY_SIGNALS[symbol].get('direction') == "BULLISH":
+                            logger.info(f"🚫 {symbol}.IS için bugün zaten AL sinyali gönderildi, tekrar gönderilmiyor.")
+                            continue
+                            
+                        # Tek mesaj formatı oluşturma
+                        message = f"<b>🟢 AL SİNYALİ - {symbol}.IS</b>\n\n"
+                        message += f"<b>Güç:</b> {highest_score_signal.strength_score:.1f}/10 ({highest_score_signal.timeframe} zaman dilimi)\n"
+                        message += f"<b>Fiyat:</b> {highest_score_signal.price:.2f} TL\n"
+                        message += "---"
+                        
+                        # Tüm zaman dilimi özetini ekle
+                        summary_text = ""
+                        for tf in TIMEFRAMES:
+                            status = get_signal_label(multi_tf_results.get(tf))
+                            summary_text += f"{tf}: <b>{status}</b> - "
+                        message += f"\n\nZaman Dilimi Özeti:\n{summary_text.strip(' - ')}"
+                        
+                        found_signals.append(highest_score_signal)
+                        DAILY_SIGNALS[symbol] = asdict(highest_score_signal)
+                        await send_telegram(message)
+                        logger.info(f"🎉 Sinyal Bulundu: {symbol} - {highest_score_signal.timeframe} - Güç: {highest_score_signal.strength_score:.1f}")
+
+        logger.info(f"✅ BIST taraması tamamlandı. {len(found_signals)} sinyal bulundu.")
+    else:
+        logger.info("❌ Borsa kapalı, tarama yapılmadı.")
         now_ist = dt.datetime.now(IST_TZ)
-        
-        # Pazar ve hafta sonu kontrolü
-        if not is_market_hours():
-            logger.info("Borsa kapalı. Pazar saati bekleniyor.")
-            
-            # Günlük raporu gönderme
-            if now_ist.hour == DAILY_REPORT_HOUR and now_ist.minute == DAILY_REPORT_MINUTE:
-                if 'daily_report_sent' not in DAILY_SIGNALS:
-                    await send_daily_report()
-                    DAILY_SIGNALS['daily_report_sent'] = 'sent' # Raporun gönderildiğini işaretle
-                    save_daily_signals_to_disk()
-            
-            # Günlük sinyal veritabanını resetleme (yeni gün başlangıcı)
-            if now_ist.hour == 0 and now_ist.minute < CHECK_EVERY_MIN and 'daily_report_sent' in DAILY_SIGNALS:
-                logger.info("Yeni gün başladı, günlük sinyal listesi sıfırlanıyor.")
-                DAILY_SIGNALS.clear()
-                save_daily_signals_to_disk()
-            
-            await asyncio.sleep(60)
-            continue
+        if now_ist.time() >= dt.time(DAILY_REPORT_HOUR, DAILY_REPORT_MINUTE) and \
+           (now_ist.time() - dt.timedelta(minutes=CHECK_EVERY_MIN)) < dt.time(DAILY_REPORT_HOUR, DAILY_REPORT_MINUTE):
+            await send_daily_report()
+            DAILY_SIGNALS.clear() # Yeni gün için sıfırla
 
-        if first_run or (LAST_SCAN_TIME and (now_ist - LAST_SCAN_TIME).total_seconds() >= CHECK_EVERY_MIN * 60):
-            await run_scan_async()
-            first_run = False
-        
-        # Sonraki kontrol zamanına kadar bekleme
-        await asyncio.sleep(30)
-        
-# --- Bot Başlangıcı ---
-if __name__ == "__main__":
+async def run_scanner_periodically():
+    while True:
+        try:
+            now_ist = dt.datetime.now(IST_TZ)
+            target_minute = (now_ist.minute // CHECK_EVERY_MIN) * CHECK_EVERY_MIN
+            target_time = now_ist.replace(minute=target_minute, second=0, microsecond=0) + dt.timedelta(minutes=CHECK_EVERY_MIN)
+            
+            if is_market_hours():
+                await scan_and_report()
+                
+            sleep_duration = (target_time - dt.datetime.now(IST_TZ)).total_seconds()
+            if sleep_duration < 0:
+                sleep_duration = CHECK_EVERY_MIN * 60 + sleep_duration
+            
+            logger.info(f"💤 Sonraki tarama için {int(sleep_duration)} saniye bekleniyor...")
+            await asyncio.sleep(sleep_duration)
+
+        except Exception as e:
+            logger.error(f"Main loop error: {e}")
+            await asyncio.sleep(60)
+
+async def start_server():
     app = web.Application()
     app.router.add_get('/health', HealthHandler)
-    
-    # Arka plan görevlerini yönetmek için aiohttp'nin yerleşik mekanizması
-    async def start_background_tasks(app):
-        app['main_loop_task'] = asyncio.create_task(main_loop())
-    
-    async def cleanup_background_tasks(app):
-        app['main_loop_task'].cancel()
-        await app['main_loop_task']
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', HEALTH_CHECK_PORT)
+    await site.start()
+    logger.info(f"✅ Sağlık kontrol sunucusu {HEALTH_CHECK_PORT} portunda başlatıldı.")
 
-    app.on_startup.append(start_background_tasks)
-    app.on_cleanup.append(cleanup_background_tasks)
+async def main():
+    await asyncio.gather(
+        start_server(),
+        run_scanner_periodically()
+    )
 
-    web.run_app(app, host='0.0.0.0', port=HEALTH_CHECK_PORT)
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot kapatılıyor.")
