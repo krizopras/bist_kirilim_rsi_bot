@@ -452,7 +452,7 @@ def is_tweezer_tops(df):
     return (
         abs(prev_c['high'] - last_c['high']) / last_c['high'] < 0.001 and
         prev_c['close'] > prev_c['open'] and
-        last_c['close'] < last_c['open']
+        last_c['close'] < prev_c['close']
     )
 
 def is_three_white_soldiers(df):
