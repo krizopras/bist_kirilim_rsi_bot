@@ -163,7 +163,8 @@ STOCHRSI_K = int(os.getenv("STOCHRSI_K", "3"))
 STOCHRSI_D = int(os.getenv("STOCHRSI_D", "3"))
 MA_SHORT = int(os.getenv("MA_SHORT", "50"))
 MA_LONG = int(os.getenv("MA_LONG", "200"))
-MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "10.0")) 
+# Çok güçlü sinyaller için minimum puan eşiği yükseltildi
+MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "12.0")) 
 
 LAST_SCAN_TIME: Optional[dt.datetime] = None
 START_TIME = time.time()
@@ -866,8 +867,22 @@ async def scan_and_report():
                             continue
                             
                         # Tek mesaj formatı oluşturma
-                        message = f"<b>🟢 AL SİNYALİ - {symbol}.IS</b>\n\n"
-                        message += f"<b>Güç:</b> {highest_score_signal.strength_score:.1f}/10 ({highest_score_signal.timeframe} zaman dilimi)\n"
+                        message = ""
+                        
+                        # Trend dönüş sinyali vurgusu
+                        is_trend_reversal = False
+                        if highest_score_signal.breakout_angle is not None and highest_score_signal.breakout_angle > 0:
+                            is_trend_reversal = True
+                        if highest_score_signal.candle_formation in ["Morning Star", "Bullish Engulfing", "Piercing Pattern", "Tweezer Bottoms"]:
+                            is_trend_reversal = True
+                            
+                        if is_trend_reversal:
+                            message += f"<b>🚨 TREND DÖNÜŞ SİNYALİ - {highest_score_signal.timeframe}</b>\n"
+                        else:
+                            message += f"<b>🟢 AL SİNYALİ - {highest_score_signal.timeframe}</b>\n"
+                            
+                        message += f"\n<b>{symbol}.IS</b>\n"
+                        message += f"<b>Güç:</b> {highest_score_signal.strength_score:.1f}/10\n"
                         message += f"<b>Fiyat:</b> {highest_score_signal.price:.2f} TL\n"
                         message += "---"
                         
@@ -879,13 +894,24 @@ async def scan_and_report():
                         message += f"\n\nZaman Dilimi Özeti:\n{summary_text.strip(' - ')}"
                         
                         # Yeni eklenen teknik gösterge detayları
+                        message += f"\n\n<b>Destekleyici Göstergeler:</b>"
+                        
+                        if highest_score_signal.breakout_angle is not None and highest_score_signal.breakout_angle > 0:
+                            message += f"\n• <b>Pozitif Uyumsuzluk (PU)</b>"
+
+                        if highest_score_signal.ma_cross == "GOLDEN_CROSS":
+                            message += f"\n• <b>Golden Cross Kesişimi</b>"
+
+                        if highest_score_signal.candle_formation in ["Morning Star", "Bullish Engulfing", "Piercing Pattern"]:
+                            message += f"\n• <b>{highest_score_signal.candle_formation} Mum Formasyonu</b>"
+                        
                         message += f"\n\n<b>Detaylı Analiz:</b>"
                         message += f"\n• <b>RSI:</b> {highest_score_signal.rsi:.2f}"
                         message += f"\n• <b>MACD Sinyali:</b> {highest_score_signal.macd_signal}"
                         message += f"\n• <b>Hacim Oranı:</b> {highest_score_signal.volume_ratio:.2f}x"
                         message += f"\n• <b>TSI:</b> {highest_score_signal.tsi_value:.2f}"
                         message += f"\n• <b>SAR:</b> {highest_score_signal.sar_status}"
-                        if highest_score_signal.candle_formation:
+                        if highest_score_signal.candle_formation and not highest_score_signal.candle_formation in ["Morning Star", "Bullish Engulfing", "Piercing Pattern"]:
                              message += f"\n• <b>Mum Formasyonu:</b> {highest_score_signal.candle_formation}"
 
                         found_signals.append(highest_score_signal)
