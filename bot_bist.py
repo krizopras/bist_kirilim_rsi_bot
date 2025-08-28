@@ -6,6 +6,7 @@ Entegre BIST Scanner + TeknikAnaliz sınıfı + Grafik gönderimi (trend çizgis
 - Telegram mesajlarına grafik (mum + indikatörler + trend + etiketler + RSI alt paneli) eklenir.
 """
 
+import io
 import os
 import asyncio
 import aiohttp
