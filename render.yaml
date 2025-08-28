@@ -35,7 +35,7 @@ services:
         value: "1000000"
         sync: false
       - key: MIN_SIGNAL_SCORE
-        value: "15.0"
+        value: "8.0"
         sync: false
       - key: LOG_LEVEL
         value: "INFO"
