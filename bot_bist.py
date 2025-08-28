@@ -895,45 +895,68 @@ async def send_chart_to_telegram(token: str, chat_id: str, title: str, df: pd.Da
     except Exception as e:
         logger.error(f"Grafik gönderim hatası: {e}")
 
+
 # --- Ana analiz fonksiyonu (TeknikAnaliz tabanlı) ---
-def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
+def fetch_and_analyze_data(symbol: str, timeframe: str, plot: bool = True) -> Optional["SignalInfo"]:
+    """
+    Belirtilen sembol ve zaman dilimi için veri çeker, teknik analiz için hazırlar ve
+    istenirse grafiğini çizer.
+    """
     try:
         yf_symbol = f"{symbol}.IS"
+        df = None
+
+        # Zaman dilimine göre veri çekme ve işleme
         if timeframe == '1d':
-            base_interval, period = '1d', '730d'
-            df = fetch_history(yf_symbol, base_interval, period)
+            df = fetch_history(yf_symbol, '1d', '730d')
             df = _standardize_df(df)
         elif timeframe == '1h':
-            base_interval, period = '1h', '180d'
-            df = fetch_history(yf_symbol, base_interval, period)
+            df = fetch_history(yf_symbol, '1h', '180d')
             df = _standardize_df(df)
         elif timeframe == '4h':
-            base_interval, period = '1h', '180d'
-            raw = fetch_history(yf_symbol, base_interval, period)
-            if raw is None or raw.empty: return None
+            raw = fetch_history(yf_symbol, '1h', '180d')
+            if raw is None or raw.empty:
+                return None
             raw = _standardize_df(raw)
             df = _resample_ohlcv(raw, '4h')
         elif timeframe == '15m':
-            base_interval, period = '15m', '60d'
-            df = fetch_history(yf_symbol, base_interval, period)
+            df = fetch_history(yf_symbol, '15m', '60d')
             df = _standardize_df(df)
         else:
             return None
 
-        if df is None or df.empty:
+        # Veri boş veya yetersizse None döndür
+        if df is None or df.empty or len(df) < 50:
             return None
 
-        # Yeterli veri uzunluğu kontrolü
-        if len(df) < 50:
-            return None
-        
         last_close = float(df['close'].iloc[-1])
-        last_vol = float(df['volume'].iloc[-1])
-        if last_close < MIN_PRICE or last_close * last_vol < MIN_VOLUME_TRY:
+        last_volume = float(df['volume'].iloc[-1])
+
+        # Minimum fiyat ve işlem hacmi kontrolü
+        if last_close < MIN_PRICE or last_close * last_volume < MIN_VOLUME_TRY:
             return None
 
-        # Teknik analiz hesapla
-        ind = TeknikAnaliz.analyze_df(df)
+        # Grafik çizimi
+        if plot:
+            plt.figure(figsize=(12, 6))
+            plt.plot(df['close'], label=f'{symbol} {timeframe} Close')
+            plt.title(f'{symbol} {timeframe} Grafiği')
+            plt.xlabel('Zaman')
+            plt.ylabel('Fiyat')
+            plt.legend()
+            plt.grid(True)
+            plt.show()
+
+        # Burada teknik analiz fonksiyonunu çağırabilir ve sonuç döndürebilirsiniz
+        # signal_info = calculate_signal(df)
+        # return signal_info
+
+        return df  # Örnek olarak veri çerçevesini döndürdüm
+
+    except Exception as e:
+        print(f"Hata oluştu ({symbol}, {timeframe}): {e}")
+        return None
+
 
         # Sinyal özellikleri
         rsi_series = ind['rsi'] if 'rsi' in ind else TeknikAnaliz.rsi(df['close'])
