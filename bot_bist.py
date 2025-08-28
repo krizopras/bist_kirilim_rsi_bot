@@ -787,6 +787,8 @@ def calculate_signal_strength(signal: SignalInfo) -> float:
         score += 2.5
     return float(max(0.0, min(10.0, score)))
 
+
+
 # ------------------ Veri çekme ve analiz ------------------
 def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     if df is None or df.empty:
@@ -1018,6 +1020,60 @@ async def send_telegram(text: str):
     except Exception as e:
         logger.warning(f"Telegram error: {e}")
 
+# --- SINYAL MESAJI OLUŞTUR ---
+# --- Mesaj ve grafik oluşturma fonksiyonu ---
+def generate_signal_message(sig: SignalInfo, df: pd.DataFrame, ind: Dict[str, Any]) -> Tuple[str, BytesIO]:
+   
+    # Mesaj metni
+    message = ""
+    is_trend_reversal = False
+    if sig.breakout_angle and sig.breakout_angle > 0:
+        is_trend_reversal = True
+    if sig.candle_formation in ["Morning Star", "Bullish Engulfing", "Piercing Pattern", "Tweezer Bottoms"]:
+        is_trend_reversal = True
+    if is_trend_reversal:
+        message += f"<b>🚨 TREND DÖNÜŞ SİNYALİ - {sig.timeframe}</b>\n"
+    else:
+        message += f"<b>🟢 AL SİNYALİ - {sig.timeframe}</b>\n"
+
+    message += f"\n<b>{sig.symbol}.IS</b>\n"
+    message += f"<b>Güç:</b> {sig.strength_score:.1f}/10\n"
+    message += f"<b>Fiyat:</b> {sig.price:.2f} TL\n---"
+    message += f"\n\n<b>Detaylı Analiz:</b>"
+    message += f"\n• <b>RSI:</b> {sig.rsi:.2f}"
+    message += f"\n• <b>MACD Sinyali:</b> {sig.macd_signal}"
+    message += f"\n• <b>Hacim Oranı:</b> {sig.volume_ratio:.2f}x"
+    if sig.tsi_value is not None:
+        message += f"\n• <b>TSI:</b> {sig.tsi_value:.2f}"
+    message += f"\n• <b>SAR:</b> {sig.sar_status}"
+    if sig.candle_formation:
+        message += f"\n• <b>Mum Formasyonu:</b> {sig.candle_formation}"
+
+    # Grafik oluştur
+    matplotlib.use("Agg")
+    fig, (ax_price, ax_rsi) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1]})
+    xs = np.arange(len(df))
+    closes = df['close'].astype(float).values
+    ax_price.plot(xs, closes, color='black', label='Kapanış')
+    ax_price.set_title(f"{sig.symbol} Fiyat Grafiği")
+    ax_price.grid(True)
+
+    if 'rsi' in ind:
+        rsi_vals = ind['rsi'].values
+        ax_rsi.plot(xs, rsi_vals, color='orange')
+        ax_rsi.axhline(70, color='red', linestyle='--')
+        ax_rsi.axhline(30, color='green', linestyle='--')
+        ax_rsi.set_ylim(0, 100)
+        ax_rsi.set_title("RSI")
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+
+    return message, buf
+
 async def send_signal_with_chart(sig: SignalInfo, df: pd.DataFrame, ind: Dict[str, Any]):
     # Text message
     message = ""
@@ -1045,9 +1101,23 @@ async def send_signal_with_chart(sig: SignalInfo, df: pd.DataFrame, ind: Dict[st
     if sig.candle_formation:
         message += f"\n• <b>Mum Formasyonu:</b> {sig.candle_formation}"
     await send_telegram(message)
-    # Grafiği gönder
-    title = f"{sig.symbol}.IS - {sig.timeframe} - {sig.direction} - Güç {sig.strength_score:.1f}/10"
-    await send_chart_to_telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, title, df.tail(200), ind)
+    
+   async def send_signal_with_chart(sig: SignalInfo, df: pd.DataFrame, ind: Dict[str, Any]):
+    # Mesaj ve grafik oluştur
+    message, chart_buf = generate_signal_message(sig, df, ind)
+    
+    # Telegram'a mesaj gönder
+    await send_telegram(message)
+    
+    # Grafiği Telegram'a gönder
+    await send_chart_to_telegram(
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID,
+        f"{sig.symbol}.IS - {sig.timeframe} - {sig.direction} - Güç {sig.strength_score:.1f}/10",
+        df.tail(200),
+        ind
+    )
+
 
 async def scan_and_report():
     global LAST_SCAN_TIME, DAILY_SIGNALS
