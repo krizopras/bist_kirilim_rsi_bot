@@ -1,9 +1,10 @@
-aiohttp>=3.8.3
-python-dotenv
-pandas>=2.2.2
-numpy>=1.26.0
-yfinance>=0.2.37
-matplotlib>=3.5.1
-pytz>=2023.3
-investpy>=1.0.8
-ta
+aiohttp>=3.8.3          # Telegram API, async HTTP istekleri
+python-dotenv           # .env dosyasından API anahtarlarını okumak için
+pandas>=2.2.2           # Veri işleme (DataFrame)
+numpy>=1.26.0           # Sayısal hesaplamalar
+yfinance>=0.2.37        # Yahoo Finance veri çekme (varsa)
+matplotlib>=3.5.1       # Mum grafiği ve teknik çizimler
+pytz>=2023.3            # Zaman dilimi yönetimi
+investpy>=1.0.8         # BIST ve diğer piyasa verileri
+ta                      # Teknik analiz indikatörleri
+scipy>=1.11.0           # find_peaks gibi sinyal işlemleri
