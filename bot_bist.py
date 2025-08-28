@@ -1102,7 +1102,7 @@ async def send_signal_with_chart(sig: SignalInfo, df: pd.DataFrame, ind: Dict[st
         message += f"\n• <b>Mum Formasyonu:</b> {sig.candle_formation}"
     await send_telegram(message)
     
-   async def send_signal_with_chart(sig: SignalInfo, df: pd.DataFrame, ind: Dict[str, Any]):
+async def send_signal_with_chart(sig: SignalInfo, df: pd.DataFrame, ind: Dict[str, Any]):
     # Mesaj ve grafik oluştur
     message, chart_buf = generate_signal_message(sig, df, ind)
     
