@@ -26,6 +26,6 @@ services:
       - key: MIN_VOLUME_TRY
         value: "1000000"
       - key: MIN_SIGNAL_SCORE
-        value: "20.0"
+        value: "15.0"
       - key: LOG_LEVEL
         value: "INFO"
