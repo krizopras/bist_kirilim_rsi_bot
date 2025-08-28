@@ -903,11 +903,11 @@ async def send_chart_to_telegram(token: str, chat_id: str, title: str, df: pd.Da
 
 
 
-# --- Ana analiz fonksiyonu (TeknikAnaliz tabanlı) ---
-def fetch_and_analyze_data(symbol: str, timeframe: str, plot: bool = True) -> Optional["SignalInfo"]:
+# --- Ana analiz ve sinyal üretim fonksiyonu ---
+def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional["SignalInfo"]:
     """
-    Belirtilen sembol ve zaman dilimi için veri çeker, teknik analiz için hazırlar ve
-    istenirse OHLC mum grafiği + hacim grafiği çizer.
+    Belirtilen sembol ve zaman dilimi için veri çeker, teknik analiz yapar ve
+    önceden tanımlanmış sinyal parametrelerine göre bir SignalInfo nesnesi döndürür.
     """
     try:
         yf_symbol = f"{symbol}.IS"
@@ -916,163 +916,94 @@ def fetch_and_analyze_data(symbol: str, timeframe: str, plot: bool = True) -> Op
         # Zaman dilimine göre veri çekme ve işleme
         if timeframe == '1d':
             df = fetch_history(yf_symbol, '1d', '730d')
-            df = _standardize_df(df)
-        elif timeframe == '1h':
-            df = fetch_history(yf_symbol, '1h', '180d')
-            df = _standardize_df(df)
         elif timeframe == '4h':
             raw = fetch_history(yf_symbol, '1h', '180d')
-            if raw is None or raw.empty:
-                return None
-            raw = _standardize_df(raw)
             df = _resample_ohlcv(raw, '4h')
+        elif timeframe == '1h':
+            df = fetch_history(yf_symbol, '1h', '60d')
         elif timeframe == '15m':
-            df = fetch_history(yf_symbol, '15m', '60d')
-            df = _standardize_df(df)
+            df = fetch_history(yf_symbol, '15m', '30d')
         else:
             return None
 
-        # Veri boş veya yetersizse None döndür
         if df is None or df.empty or len(df) < 50:
+            logger.warning(f"{symbol} için yetersiz veri ({len(df)})")
             return None
 
+        # Veriyi standartlaştırma ve temel kontroller
+        df = _standardize_df(df)
         last_close = float(df['close'].iloc[-1])
         last_volume = float(df['volume'].iloc[-1])
 
-        # Minimum fiyat ve işlem hacmi kontrolü
         if last_close < MIN_PRICE or last_close * last_volume < MIN_VOLUME_TRY:
             return None
 
-        # Grafik çizimi (OHLC mum + hacim)
-        if plot:
-            # mplfinance OHLC formatı için index datetime olmalı
-            df_plot = df.copy()
-            if not df_plot.index.dtype == 'datetime64[ns]':
-                df_plot.index = df_plot['datetime']
+        # Tüm teknik indikatörleri hesapla
+        ind = TeknikAnaliz.analyze_df(df)
 
-            mpf.plot(
-                df_plot,
-                type='candle',
-                volume=True,
-                style='yahoo',
-                title=f'{symbol} {timeframe} Mum Grafiği',
-                ylabel='Fiyat',
-                ylabel_lower='Hacim',
-                figsize=(14, 7)
-            )
-
-        # Burada teknik analiz fonksiyonunu çağırabilir ve sonuç döndürebilirsiniz
-        # signal_info = calculate_signal(df)
-        # return signal_info
-
-        return df  # Örnek olarak veri çerçevesini döndürdüm
-
-    except Exception as e:
-        print(f"Hata oluştu ({symbol}, {timeframe}): {e}")
-        return None
-
-        # Veri boş veya yetersizse None döndür
-        if df is None or df.empty or len(df) < 50:
-            return None
-
-        last_close = float(df['close'].iloc[-1])
-        last_volume = float(df['volume'].iloc[-1])
-
-        # Minimum fiyat ve işlem hacmi kontrolü
-        if last_close < MIN_PRICE or last_close * last_volume < MIN_VOLUME_TRY:
-            return None
-
-        # Grafik çizimi
-        if plot:
-            plt.figure(figsize=(12, 6))
-            plt.plot(df['close'], label=f'{symbol} {timeframe} Close')
-            plt.title(f'{symbol} {timeframe} Grafiği')
-            plt.xlabel('Zaman')
-            plt.ylabel('Fiyat')
-            plt.legend()
-            plt.grid(True)
-            plt.show()
-
-        # Burada teknik analiz fonksiyonunu çağırabilir ve sonuç döndürebilirsiniz
-        # signal_info = calculate_signal(df)
-        # return signal_info
-
-        return df  # Örnek olarak veri çerçevesini döndürdüm
-
-    except Exception as e:
-        print(f"Hata oluştu ({symbol}, {timeframe}): {e}")
-        return None
-
-
-        # Sinyal özellikleri
-        rsi_series = ind['rsi'] if 'rsi' in ind else TeknikAnaliz.rsi(df['close'])
-        rsi_ema = ema(rsi_series, RSI_EMA_LEN)
-        macd_line, macd_sig, macd_hist = calculate_macd(df['close'], MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-        bb_lower, bb_mid, bb_upper = ind.get('bb_low'), ind.get('bb_mid'), ind.get('bb_up')
-
-        tsi_series = calculate_tsi(df['close'])
-        sar_series = calculate_sar(df['high'], df['low'])
-        sar_status = "BULLISH" if sar_series.iloc[-1] < df['close'].iloc[-1] else "BEARISH"
-
-        volume_sma = sma(df['volume'], 20)
-        current_volume = df['volume'].iloc[-1]
-        avg_volume = volume_sma.iloc[-1] if not volume_sma.empty else 1.0
-        volume_ratio = float(current_volume / avg_volume) if (avg_volume and avg_volume > 0) else 1.0
-
-        highs_idx, lows_idx = find_pivots(rsi_series, PIVOT_PERIOD, PIVOT_PERIOD)
-        now_i = len(rsi_series) - 1
-        bull_break, bear_break, breakout_angle = detect_breakouts(rsi_series, highs_idx, lows_idx, now_i)
-
-        current_rsi = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
-        current_price = float(df['close'].iloc[-1])
-
-        macd_signal_str = "NEUTRAL"
-        if len(macd_hist) > 1:
-            if macd_hist.iloc[-1] > 0 and macd_hist.iloc[-2] <= 0: macd_signal_str = "BULLISH"
-            elif macd_hist.iloc[-1] < 0 and macd_hist.iloc[-2] >= 0: macd_signal_str = "BEARISH"
-
-        is_bull_signal = bull_break or (macd_signal_str == "BULLISH" and current_rsi < 50)
-        is_bear_signal = bear_break or (macd_signal_str == "BEARISH" and current_rsi > 50)
-        
-       
-
-        bb_pos_label = classify_bb_position(current_price, float(bb_upper.iloc[-1]), float(bb_lower.iloc[-1]), BB_NEAR_PCT) if bb_upper is not None else "MIDDLE"
-        direction = "BULLISH" if is_bull_signal else "BEARISH"
-        volume_try = current_price * current_volume
+        # Sinyal parametrelerini topla
+        rsi_val = float(ind['rsi'].iloc[-1])
+        stoch_k = float(ind['stoch_k'].iloc[-1])
+        stoch_d = float(ind['stoch_d'].iloc[-1])
         candle_form = detect_candle_formation(df)
-        stochrsi_k, stochrsi_d = calculate_stoch_rsi(rsi_series, STOCHRSI_PERIOD, STOCHRSI_K, STOCHRSI_D)
-        ma_cross_type = detect_ma_cross(df['close'], MA_SHORT, MA_LONG)
+        ma_cross = detect_ma_cross(df['close'], MA_SHORT, MA_LONG)
+        tsi_val = float(calculate_tsi(df['close']).iloc[-1])
+        sar_val = calculate_sar(df['high'], df['low'])
+        sar_status = 'BULLISH' if last_close > sar_val.iloc[-1] else 'BEARISH'
+        bb_pos = classify_bb_position(last_close, float(ind['bb_up'].iloc[-1]), float(ind['bb_low'].iloc[-1]), BB_NEAR_PCT)
+        volume_ratio = float(last_volume / max(df['volume'].rolling(20).mean().iloc[-1], 1))
+        
+        # Sinyal yönünü belirleme: RSI'a göre daha doğru mantık
+        direction = None
+        if rsi_val < 35 or stoch_k < 20 or bb_pos in ["LOWER", "NEAR_LOWER"]:
+            direction = "BULLISH"
+        elif rsi_val > 65 or stoch_k > 80 or bb_pos in ["UPPER", "NEAR_UPPER"]:
+            direction = "BEARISH"
 
-        base_signal = SignalInfo(
-            symbol=symbol, timeframe=timeframe, direction=direction, price=current_price,
-            rsi=current_rsi, rsi_ema=float(rsi_ema.iloc[-1]) if not rsi_ema.empty else current_rsi,
-            volume_ratio=volume_ratio, volume_try=volume_try, macd_signal=macd_signal_str,
-            bb_position=bb_pos_label, strength_score=0.0, timestamp=df.index[-1].strftime('%Y-%m-%d %H:%M'),
-            breakout_angle=breakout_angle, candle_formation=candle_form, multi_tf_score=0.0,
-            stochrsi_k=stochrsi_k, stochrsi_d=stochrsi_d, ma_cross=ma_cross_type,
-            tsi_value=float(tsi_series.iloc[-1]) if not tsi_series.empty else None,
-            sar_status=sar_status, breakout_coords=ind.get('breakout_coords')
+        if direction is None:
+            return None
+
+        # Sinyal nesnesini oluştur
+        signal = SignalInfo(
+            symbol=symbol,
+            timeframe=timeframe,
+            direction=direction,
+            price=last_close,
+            rsi=rsi_val,
+            rsi_ema=float(ema(ind['rsi'], RSI_EMA_LEN).iloc[-1]),
+            volume_ratio=volume_ratio,
+            volume_try=last_close * last_volume,
+            macd_signal="BULLISH" if calculate_macd(df['close'], MACD_FAST, MACD_SLOW, MACD_SIGNAL)[0].iloc[-1] > calculate_macd(df['close'], MACD_FAST, MACD_SLOW, MACD_SIGNAL)[1].iloc[-1] else "BEARISH",
+            bb_position=bb_pos,
+            strength_score=0.0,
+            timestamp=str(dt.datetime.now(IST_TZ)),
+            breakout_angle=ind.get('breakout_score', 0.0),
+            candle_formation=candle_form,
+            stochrsi_k=stoch_k,
+            stochrsi_d=stoch_d,
+            ma_cross=ma_cross,
+            tsi_value=tsi_val,
+            sar_status=sar_status,
+            breakout_coords=ind.get('breakout_coords')
         )
 
-        # Score: hem eski calculate_signal_strength, hem TeknikAnaliz.signals_from_indicators'den gelen küçük katkı
-        try:
-            ta_sig = TeknikAnaliz.signals_from_indicators(df, ind)
-            extra = sum(ta_sig.values())
-        except Exception:
-            extra = 0.0
-        base_signal.strength_score = float(max(0.0, min(10.0, calculate_signal_strength(base_signal) + extra)))
-        return base_signal
+        # Sinyal gücü puanlamasını hesapla
+        signal.strength_score = calculate_signal_strength(signal)
+        
+        if signal.strength_score < MIN_SIGNAL_SCORE:
+            logger.info(f"{signal.symbol} için sinyal gücü düşük ({signal.strength_score:.2f})")
+            return None
+
+        return signal
+    
     except Exception as e:
-        logger.error(f"Veri çekme veya analiz hatası: {e}")
+        logger.error(f"{symbol} analiz hatası: {e}")
         return None
 
-def get_signal_label(signal: Optional[SignalInfo]) -> str:
+def get_signal_label(signal: Optional["SignalInfo"]) -> str:
     if not signal:
         return "Nötr"
-    if signal.direction == "BULLISH":
-        return "AL"
-    else:
-        return "SAT"
+    return "AL" if signal.direction == "BULLISH" else "SAT"
 
 # --- Tarama ve raporlama döngüsü ---
 async def send_telegram(text: str):
