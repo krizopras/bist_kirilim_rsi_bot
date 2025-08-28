@@ -826,89 +826,94 @@ def classify_bb_position(price: float, upper: float, lower: float, near_pct: flo
 
 async def send_chart_to_telegram(token: str, chat_id: str, title: str, df: pd.DataFrame, ind: Dict[str, Any]):
     try:
-        base = f"https://api.telegram.org/bot{token}"
-        # Çizim
-        fig, (ax_price, ax_rsi) = plt.subplots(2,1, figsize=(12,8), gridspec_kw={'height_ratios':[3,1]})
+        # matplotlib backend'ini ayarla
+        matplotlib.use("Agg")
+        
+        # Grafik alanını ve panelleri oluştur
+        fig, (ax_price, ax_rsi) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1]})
+
+        # Veri hazırlığı
         xs = np.arange(len(df))
         opens = df['open'].astype(float).values
         highs = df['high'].astype(float).values
         lows = df['low'].astype(float).values
         closes = df['close'].astype(float).values
         width = 0.6
-        half_width = width/2.0
+        half_width = width / 2.0
 
         # Mum grafiği çizimi
         for i in range(len(df)):
-            o,h,l,c = opens[i], highs[i], lows[i], closes[i]
+            o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+            # Çizgi gölgeyi temsil eder
             ax_price.vlines(xs[i], l, h, linewidth=1, color='black')
+            # Rektörtgen gövdeyi temsil eder
             color = '#26a69a' if c >= o else '#ef5350'
-            rect = Rectangle((xs[i]-half_width, min(o,c)), width, abs(c-o), edgecolor='black', facecolor=color)
+            rect = Rectangle((xs[i] - half_width, min(o, c)), width, abs(c - o), edgecolor='black', facecolor=color)
             ax_price.add_patch(rect)
 
-        # İndikatörler
+        # İndikatörleri Fiyat Paneline Ekle
         if 'bb_low' in ind:
-            ax_price.plot(xs, ind['bb_low'].values, label='BB Low', alpha=0.6)
-            ax_price.plot(xs, ind['bb_mid'].values, label='BB Mid', alpha=0.6)
-            ax_price.plot(xs, ind['bb_up'].values, label='BB Up', alpha=0.6)
+            ax_price.plot(xs, ind['bb_low'].values, label='BB Alt', color='blue', alpha=0.6)
+            ax_price.plot(xs, ind['bb_mid'].values, label='BB Orta', color='orange', alpha=0.6)
+            ax_price.plot(xs, ind['bb_up'].values, label='BB Üst', color='blue', alpha=0.6)
+        
         if 'vwap' in ind:
-            ax_price.plot(xs, ind['vwap'].values, label='VWAP', alpha=0.8)
-        ax_price.plot(xs, closes, linewidth=1.0, label='Close')
+            ax_price.plot(xs, ind['vwap'].values, label='VWAP', color='purple', linestyle='--', alpha=0.8)
+        
+        ax_price.plot(xs, closes, linewidth=1.0, label='Kapanış Fiyatı', color='black', alpha=0.8)
 
         # Trend çizgisi ve etiketler
         breakout_coords = ind.get('breakout_coords')
         if breakout_coords:
             idx1, y1, idx2, y2 = breakout_coords
-            ax_price.plot([idx1, idx2], [y1, y2], linestyle='--', linewidth=2, label='Düşen Trend', alpha=0.9)
-            ax_price.text(idx1, y1, f"{y1:.2f}", fontsize=9, color="blue")
-            ax_price.text(idx2, y2, f"{y2:.2f}", fontsize=9, color="blue")
-            ax_price.text(xs[-1], closes[-1], f"{closes[-1]:.2f}", fontsize=9, color="green")
-            ax_price.axvline(x=xs[-1], color='green', linestyle=':', linewidth=1.8, alpha=0.8)
+            ax_price.plot([idx1, idx2], [y1, y2], linestyle='--', linewidth=2, color='red', label='Düşen Trend', alpha=0.9)
+            ax_price.text(idx1, y1, f"{y1:.2f}", fontsize=9, color="red")
+            ax_price.text(idx2, y2, f"{y2:.2f}", fontsize=9, color="red")
+
+        # Son fiyat etiketi
+        ax_price.text(xs[-1], closes[-1], f"{closes[-1]:.2f}", fontsize=10, color="green", weight='bold')
+        ax_price.axvline(x=xs[-1], color='green', linestyle=':', linewidth=1.8, alpha=0.8)
 
         ax_price.legend(loc='upper left')
         ax_price.grid(True, alpha=0.3)
+        ax_price.set_title(f"{title} - Mum Grafiği", fontsize=16)
+        ax_price.set_ylabel("Fiyat")
 
         # RSI paneli
         if 'rsi' in ind:
             rsi_vals = ind['rsi'].values
-            ax_rsi.plot(xs, rsi_vals, linewidth=1.5)
-            ax_rsi.axhline(y=70, linestyle='--', alpha=0.6)
-            ax_rsi.axhline(y=30, linestyle='--', alpha=0.6)
-            ax_rsi.set_ylim(0,100)
+            ax_rsi.plot(xs, rsi_vals, linewidth=1.5, color='orange')
+            ax_rsi.axhline(y=70, linestyle='--', color='red', alpha=0.6, label='Aşırı Alım')
+            ax_rsi.axhline(y=30, linestyle='--', color='green', alpha=0.6, label='Aşırı Satım')
+            ax_rsi.set_ylim(0, 100)
             ax_rsi.grid(True, alpha=0.3)
+            ax_rsi.set_title("RSI", fontsize=12)
+            ax_rsi.set_ylabel("RSI")
 
         plt.tight_layout()
 
-        # Buffer üzerinden Telegram'a gönder
+        # Grafiği hafızaya kaydet
         import io
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
         plt.close(fig)
         buf.seek(0)
 
-        url = f"{base}/sendPhoto"
-        data = aiohttp.FormData()
-        data.add_field("chat_id", chat_id)
-        data.add_field("photo", buf, filename="chart.png", content_type="image/png")
-        data.add_field("caption", title)
-
-        timeout = aiohttp.ClientTimeout(total=60)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, data=data) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    print(f"Telegram grafik hatası {resp.status}: {body}")
+        # Telegram'a fotoğraf olarak gönder
+        url = f"https://api.telegram.org/bot{token}/sendPhoto"
+        async with aiohttp.ClientSession() as session:
+            form = aiohttp.FormData()
+            form.add_field('chat_id', chat_id)
+            form.add_field('photo', buf, filename='chart.png', content_type='image/png')
+            await session.post(url, data=form)
 
     except Exception as e:
-        print(f"Grafik gönderim hatası: {e}")
-
-
-
+        logger.error(f"Grafik çizme veya gönderme hatası: {e}")
 # --- Ana analiz ve sinyal üretim fonksiyonu ---
-# --- Ana analiz ve sinyal üretim fonksiyonu ---
-def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional["SignalInfo"]:
+def fetch_and_analyze_data(symbol: str, timeframe: str) -> Tuple[Optional["SignalInfo"], Optional[pd.DataFrame], Optional[Dict[str, Any]]]:
     """
     Belirtilen sembol ve zaman dilimi için veri çeker, teknik analiz yapar ve
-    önceden tanımlanmış sinyal parametrelerine göre bir SignalInfo nesnesi döndürür.
+    sinyal, veri çerçevesi ve indikatörleri döndürür.
     """
     try:
         yf_symbol = f"{symbol}.IS"
@@ -919,17 +924,18 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional["SignalInfo"
             df = fetch_history(yf_symbol, '1d', '730d')
         elif timeframe == '4h':
             raw = fetch_history(yf_symbol, '1h', '180d')
+            if raw is None or raw.empty: return None, None, None
             df = _resample_ohlcv(raw, '4h')
         elif timeframe == '1h':
             df = fetch_history(yf_symbol, '1h', '60d')
         elif timeframe == '15m':
             df = fetch_history(yf_symbol, '15m', '30d')
         else:
-            return None
+            return None, None, None
 
         if df is None or df.empty or len(df) < 50:
             logger.warning(f"{symbol} için yetersiz veri ({len(df)})")
-            return None
+            return None, None, None
 
         # Veriyi standartlaştırma ve temel kontroller
         df = _standardize_df(df)
@@ -937,7 +943,7 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional["SignalInfo"
         last_volume = float(df['volume'].iloc[-1])
 
         if last_close < MIN_PRICE or last_close * last_volume < MIN_VOLUME_TRY:
-            return None
+            return None, None, None
 
         # Tüm teknik indikatörleri hesapla
         ind = TeknikAnaliz.analyze_df(df)
@@ -954,7 +960,7 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional["SignalInfo"
         bb_pos = classify_bb_position(last_close, float(ind['bb_up'].iloc[-1]), float(ind['bb_low'].iloc[-1]), BB_NEAR_PCT)
         volume_ratio = float(last_volume / max(df['volume'].rolling(20).mean().iloc[-1], 1))
         
-        # Sinyal yönünü belirleme: RSI'a göre daha doğru mantık
+        # Sinyal yönünü belirleme
         direction = None
         if rsi_val < 35 or stoch_k < 20 or bb_pos in ["LOWER", "NEAR_LOWER"]:
             direction = "BULLISH"
@@ -962,7 +968,7 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional["SignalInfo"
             direction = "BEARISH"
 
         if direction is None:
-            return None
+            return None, df, ind
 
         # Sinyal nesnesini oluştur
         signal = SignalInfo(
@@ -993,18 +999,13 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional["SignalInfo"
         
         if signal.strength_score < MIN_SIGNAL_SCORE:
             logger.info(f"{signal.symbol} için sinyal gücü düşük ({signal.strength_score:.2f})")
-            return None
+            return None, df, ind
 
-        return signal
+        return signal, df, ind
     
     except Exception as e:
         logger.error(f"{symbol} analiz hatası: {e}")
-        return None
-
-def get_signal_label(signal: Optional["SignalInfo"]) -> str:
-    if not signal:
-        return "Nötr"
-    return "AL" if signal.direction == "BULLISH" else "SAT"
+        return None, None, None
 
 # --- Tarama ve raporlama döngüsü ---
 async def send_telegram(text: str):
