@@ -1058,11 +1058,9 @@ async def scan_and_report():
         with ThreadPoolExecutor(max_workers=max(4, (os.cpu_count() or 2)//1)) as executor:
             loop = asyncio.get_running_loop()
             tasks = []
-            # fetch daily in parallel to warm up if needed
             for symbol in TICKERS:
                 tasks.append(loop.run_in_executor(executor, fetch_history, f"{symbol}.IS", "1d", "1y"))
             daily_dfs = await asyncio.gather(*tasks, return_exceptions=True)
-            # For each symbol, do multi-timeframe analysis (synchronously here to avoid huge concurrency)
             for i, symbol in enumerate(TICKERS):
                 try:
                     daily_df = daily_dfs[i]
@@ -1070,21 +1068,30 @@ async def scan_and_report():
                         continue
                     multi_tf_results = {}
                     for tf in TIMEFRAMES:
-                        # fetch_and_analyze_data returns a tuple (signal, df, ind)
                         result = await loop.run_in_executor(executor, fetch_and_analyze_data, symbol, tf)
-                        # Check if a valid signal object was returned (first element of tuple)
                         if result and result[0] is not None:
-                            # Store the entire tuple for later use (for plotting)
                             multi_tf_results[tf] = result
 
                     if multi_tf_results:
-                        # Find the strongest signal by accessing the strength_score of the SignalInfo object (result[0])
                         highest_signal_tuple = max(multi_tf_results.values(), key=lambda s: s[0].strength_score)
                         
                         highest_signal = highest_signal_tuple[0]
+                        
+                        # Grafik için veri ve indikatörleri al
                         tf_df = highest_signal_tuple[1]
                         tf_ind = highest_signal_tuple[2]
+
+                        # Sadece son 200 veri noktasını kullanmak için DataFrame'i kes
+                        plot_df = tf_df.tail(200).copy()
                         
+                        # İndikatörleri de DataFrame ile aynı boyuta getir
+                        plot_ind = {}
+                        for key, value in tf_ind.items():
+                            if isinstance(value, pd.Series):
+                                plot_ind[key] = value.iloc[-200:]
+                            else:
+                                plot_ind[key] = value
+
                         if highest_signal.direction == "BULLISH" and highest_signal.strength_score >= MIN_SIGNAL_SCORE:
                             today_date_str = dt.datetime.now(IST_TZ).strftime('%Y-%m-%d')
                             if symbol in DAILY_SIGNALS and DAILY_SIGNALS[symbol].get('direction') == "BULLISH":
@@ -1095,7 +1102,7 @@ async def scan_and_report():
                             DAILY_SIGNALS[symbol] = asdict(highest_signal)
                             
                             # send text + chart
-                            await send_signal_with_chart(highest_signal, tf_df, tf_ind)
+                            await send_signal_with_chart(highest_signal, plot_df, plot_ind)
                             logger.info(f"🎉 Sinyal Bulundu: {symbol} - {highest_signal.timeframe} - Güç: {highest_signal.strength_score:.1f}")
                 except Exception as e:
                     logger.warning(f"{symbol} analiz hatası: {e}")
