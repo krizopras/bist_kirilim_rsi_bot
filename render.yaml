@@ -8,24 +8,35 @@ services:
       python main.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
+        value: "8126426839:AAFUFI5b6Yh53qoq0hlDXDiwtgLKM529hl0"
         sync: false
       - key: TELEGRAM_CHAT_ID
+        value: "-1002965909429"
         sync: false
       - key: COLLECTAPI_KEY
+        value: "3SxnxfKhyEFQ7xzmKfF03F:6L8sRTM78MzwbUCT86IHLa"
         sync: false
       - key: SCAN_MODE
-        value: ALL
+        value: "ALL"
+        sync: false
       - key: CUSTOM_TICKERS
         value: ""
+        sync: false
       - key: CHECK_EVERY_MIN
         value: "15"
+        sync: false
       - key: TIMEFRAMES
         value: "1d,4h,1h,15m"
+        sync: false
       - key: MIN_PRICE
         value: "1.0"
+        sync: false
       - key: MIN_VOLUME_TRY
         value: "1000000"
+        sync: false
       - key: MIN_SIGNAL_SCORE
         value: "15.0"
+        sync: false
       - key: LOG_LEVEL
         value: "INFO"
+        sync: false
