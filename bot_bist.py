@@ -823,6 +823,7 @@ def classify_bb_position(price: float, upper: float, lower: float, near_pct: flo
     return "MIDDLE"
 
 # --- GRAFİK OLUŞTUR VE TELEGRAM'A GÖNDER (MUM + TREND + ETİKET) ---
+
 async def send_chart_to_telegram(token: str, chat_id: str, title: str, df: pd.DataFrame, ind: Dict[str, Any]):
     try:
         base = f"https://api.telegram.org/bot{token}"
@@ -835,15 +836,16 @@ async def send_chart_to_telegram(token: str, chat_id: str, title: str, df: pd.Da
         closes = df['close'].astype(float).values
         width = 0.6
         half_width = width/2.0
+
+        # Mum grafiği çizimi
         for i in range(len(df)):
             o,h,l,c = opens[i], highs[i], lows[i], closes[i]
-            ax_price.vlines(xs[i], l, h, linewidth=1)
-            if c >= o:
-                rect = Rectangle((xs[i]-half_width, o), width, c-o, edgecolor='black', facecolor='#26a69a')
-            else:
-                rect = Rectangle((xs[i]-half_width, c), width, o-c, edgecolor='black', facecolor='#ef5350')
+            ax_price.vlines(xs[i], l, h, linewidth=1, color='black')
+            color = '#26a69a' if c >= o else '#ef5350'
+            rect = Rectangle((xs[i]-half_width, min(o,c)), width, abs(c-o), edgecolor='black', facecolor=color)
             ax_price.add_patch(rect)
-        # indikatörler
+
+        # İndikatörler
         if 'bb_low' in ind:
             ax_price.plot(xs, ind['bb_low'].values, label='BB Low', alpha=0.6)
             ax_price.plot(xs, ind['bb_mid'].values, label='BB Mid', alpha=0.6)
@@ -851,20 +853,20 @@ async def send_chart_to_telegram(token: str, chat_id: str, title: str, df: pd.Da
         if 'vwap' in ind:
             ax_price.plot(xs, ind['vwap'].values, label='VWAP', alpha=0.8)
         ax_price.plot(xs, closes, linewidth=1.0, label='Close')
-        # trend çizgisi
+
+        # Trend çizgisi ve etiketler
         breakout_coords = ind.get('breakout_coords')
         if breakout_coords:
             idx1, y1, idx2, y2 = breakout_coords
-            x1, x2 = int(idx1 - (len(df)-len(df))), int(idx2 - (len(df)-len(df)))  # absolute indices already match xs indexes
-            # x1,x2 are absolute positions that should correspond to df index positions; convert to 0..N-1
-            # If idx1/idx2 are absolute index positions relative to df (0..N-1) we can use them directly
             ax_price.plot([idx1, idx2], [y1, y2], linestyle='--', linewidth=2, label='Düşen Trend', alpha=0.9)
             ax_price.text(idx1, y1, f"{y1:.2f}", fontsize=9, color="blue")
             ax_price.text(idx2, y2, f"{y2:.2f}", fontsize=9, color="blue")
             ax_price.text(xs[-1], closes[-1], f"{closes[-1]:.2f}", fontsize=9, color="green")
             ax_price.axvline(x=xs[-1], color='green', linestyle=':', linewidth=1.8, alpha=0.8)
+
         ax_price.legend(loc='upper left')
         ax_price.grid(True, alpha=0.3)
+
         # RSI paneli
         if 'rsi' in ind:
             rsi_vals = ind['rsi'].values
@@ -873,34 +875,39 @@ async def send_chart_to_telegram(token: str, chat_id: str, title: str, df: pd.Da
             ax_rsi.axhline(y=30, linestyle='--', alpha=0.6)
             ax_rsi.set_ylim(0,100)
             ax_rsi.grid(True, alpha=0.3)
+
         plt.tight_layout()
-        buf = None
+
+        # Buffer üzerinden Telegram'a gönder
         import io
         buf = io.BytesIO()
         fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
         plt.close(fig)
         buf.seek(0)
-        # Telegram'a gönder
+
         url = f"{base}/sendPhoto"
         data = aiohttp.FormData()
         data.add_field("chat_id", chat_id)
         data.add_field("photo", buf, filename="chart.png", content_type="image/png")
         data.add_field("caption", title)
+
         timeout = aiohttp.ClientTimeout(total=60)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, data=data) as resp:
                 if resp.status >= 400:
                     body = await resp.text()
-                    logger.warning("Telegram grafik hatası %s: %s", resp.status, body)
+                    print(f"Telegram grafik hatası {resp.status}: {body}")
+
     except Exception as e:
-        logger.error(f"Grafik gönderim hatası: {e}")
+        print(f"Grafik gönderim hatası: {e}")
+
 
 
 # --- Ana analiz fonksiyonu (TeknikAnaliz tabanlı) ---
 def fetch_and_analyze_data(symbol: str, timeframe: str, plot: bool = True) -> Optional["SignalInfo"]:
     """
     Belirtilen sembol ve zaman dilimi için veri çeker, teknik analiz için hazırlar ve
-    istenirse grafiğini çizer.
+    istenirse OHLC mum grafiği + hacim grafiği çizer.
     """
     try:
         yf_symbol = f"{symbol}.IS"
@@ -924,6 +931,45 @@ def fetch_and_analyze_data(symbol: str, timeframe: str, plot: bool = True) -> Op
             df = _standardize_df(df)
         else:
             return None
+
+        # Veri boş veya yetersizse None döndür
+        if df is None or df.empty or len(df) < 50:
+            return None
+
+        last_close = float(df['close'].iloc[-1])
+        last_volume = float(df['volume'].iloc[-1])
+
+        # Minimum fiyat ve işlem hacmi kontrolü
+        if last_close < MIN_PRICE or last_close * last_volume < MIN_VOLUME_TRY:
+            return None
+
+        # Grafik çizimi (OHLC mum + hacim)
+        if plot:
+            # mplfinance OHLC formatı için index datetime olmalı
+            df_plot = df.copy()
+            if not df_plot.index.dtype == 'datetime64[ns]':
+                df_plot.index = df_plot['datetime']
+
+            mpf.plot(
+                df_plot,
+                type='candle',
+                volume=True,
+                style='yahoo',
+                title=f'{symbol} {timeframe} Mum Grafiği',
+                ylabel='Fiyat',
+                ylabel_lower='Hacim',
+                figsize=(14, 7)
+            )
+
+        # Burada teknik analiz fonksiyonunu çağırabilir ve sonuç döndürebilirsiniz
+        # signal_info = calculate_signal(df)
+        # return signal_info
+
+        return df  # Örnek olarak veri çerçevesini döndürdüm
+
+    except Exception as e:
+        print(f"Hata oluştu ({symbol}, {timeframe}): {e}")
+        return None
 
         # Veri boş veya yetersizse None döndür
         if df is None or df.empty or len(df) < 50:
