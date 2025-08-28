@@ -1070,44 +1070,32 @@ async def scan_and_report():
                         continue
                     multi_tf_results = {}
                     for tf in TIMEFRAMES:
-                        sig = await loop.run_in_executor(executor, fetch_and_analyze_data, symbol, tf)
-                        if sig:
-                            multi_tf_results[tf] = sig
+                        # fetch_and_analyze_data returns a tuple (signal, df, ind)
+                        result = await loop.run_in_executor(executor, fetch_and_analyze_data, symbol, tf)
+                        # Check if a valid signal object was returned (first element of tuple)
+                        if result and result[0] is not None:
+                            # Store the entire tuple for later use (for plotting)
+                            multi_tf_results[tf] = result
+
                     if multi_tf_results:
-                        highest_signal = max(multi_tf_results.values(), key=lambda s: s.strength_score)
+                        # Find the strongest signal by accessing the strength_score of the SignalInfo object (result[0])
+                        highest_signal_tuple = max(multi_tf_results.values(), key=lambda s: s[0].strength_score)
+                        
+                        highest_signal = highest_signal_tuple[0]
+                        tf_df = highest_signal_tuple[1]
+                        tf_ind = highest_signal_tuple[2]
+                        
                         if highest_signal.direction == "BULLISH" and highest_signal.strength_score >= MIN_SIGNAL_SCORE:
                             today_date_str = dt.datetime.now(IST_TZ).strftime('%Y-%m-%d')
                             if symbol in DAILY_SIGNALS and DAILY_SIGNALS[symbol].get('direction') == "BULLISH":
                                 logger.info(f"🚫 {symbol}.IS için bugün zaten AL sinyali gönderildi, tekrar gönderilmiyor.")
                                 continue
-                            # use df/ind for chart creation (use timeframe df)
-                            tf_df = None
-                            tf_ind = None
-                            try:
-                                # get df/ind for the timeframe used
-                                tf = highest_signal.timeframe
-                                # re-fetch small df for plotting
-                                if tf == '1d':
-                                    tmp = fetch_history(f"{symbol}.IS", '1d', '2y')
-                                    tmp = _standardize_df(tmp).dropna()
-                                elif tf == '4h':
-                                    raw = fetch_history(f"{symbol}.IS", '1h', '180d')
-                                    raw = _standardize_df(raw)
-                                    tmp = _resample_ohlcv(raw, '4h')
-                                else:
-                                    tmp = fetch_history(f"{symbol}.IS", tf, '180d')
-                                    tmp = _standardize_df(tmp)
-                                if tmp is not None and not tmp.empty:
-                                    tf_df = tmp.tail(500)
-                                    tf_ind = TeknikAnaliz.analyze_df(tf_df)
-                            except Exception as e:
-                                logger.warning(f"Grafik verisi alınamadı: {e}")
-                                tf_df = None
-                                tf_ind = None
+                            
                             found_signals.append(highest_signal)
                             DAILY_SIGNALS[symbol] = asdict(highest_signal)
+                            
                             # send text + chart
-                            await send_signal_with_chart(highest_signal, tf_df if tf_df is not None else pd.DataFrame(), tf_ind if tf_ind is not None else {})
+                            await send_signal_with_chart(highest_signal, tf_df, tf_ind)
                             logger.info(f"🎉 Sinyal Bulundu: {symbol} - {highest_signal.timeframe} - Güç: {highest_signal.strength_score:.1f}")
                 except Exception as e:
                     logger.warning(f"{symbol} analiz hatası: {e}")
