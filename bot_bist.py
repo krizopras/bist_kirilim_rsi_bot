@@ -904,6 +904,7 @@ async def send_chart_to_telegram(token: str, chat_id: str, title: str, df: pd.Da
 
 
 # --- Ana analiz ve sinyal üretim fonksiyonu ---
+# --- Ana analiz ve sinyal üretim fonksiyonu ---
 def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional["SignalInfo"]:
     """
     Belirtilen sembol ve zaman dilimi için veri çeker, teknik analiz yapar ve
