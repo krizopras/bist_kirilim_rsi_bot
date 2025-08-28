@@ -966,10 +966,8 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
 
         is_bull_signal = bull_break or (macd_signal_str == "BULLISH" and current_rsi < 50)
         is_bear_signal = bear_break or (macd_signal_str == "BEARISH" and current_rsi > 50)
-        if not (is_bull_signal or is_bear_signal):
-            return None
-        if volume_ratio < MIN_VOLUME_RATIO:
-            return None
+        
+       
 
         bb_pos_label = classify_bb_position(current_price, float(bb_upper.iloc[-1]), float(bb_lower.iloc[-1]), BB_NEAR_PCT) if bb_upper is not None else "MIDDLE"
         direction = "BULLISH" if is_bull_signal else "BEARISH"
