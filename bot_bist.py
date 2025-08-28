@@ -923,12 +923,10 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
         if df is None or df.empty:
             return None
 
-        # yeterli uzunluk kontrolü
-        needed_len = max(300, MA_LONG + 10, RSI_LEN + STOCHRSI_PERIOD)
-        df = df.dropna().tail(needed_len)
+        # Yeterli veri uzunluğu kontrolü
         if len(df) < 50:
             return None
-
+        
         last_close = float(df['close'].iloc[-1])
         last_vol = float(df['volume'].iloc[-1])
         if last_close < MIN_PRICE or last_close * last_vol < MIN_VOLUME_TRY:
@@ -996,7 +994,7 @@ def fetch_and_analyze_data(symbol: str, timeframe: str) -> Optional[SignalInfo]:
         base_signal.strength_score = float(max(0.0, min(10.0, calculate_signal_strength(base_signal) + extra)))
         return base_signal
     except Exception as e:
-        logger.warning(f"Error analyzing {symbol} on {timeframe}: {e}")
+        logger.error(f"Veri çekme veya analiz hatası: {e}")
         return None
 
 def get_signal_label(signal: Optional[SignalInfo]) -> str:
