@@ -8,3 +8,4 @@ pytz
 investpy
 ta
 scipy
+tradingview_ta
