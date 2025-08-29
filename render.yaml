@@ -7,15 +7,23 @@ services:
     startCommand: |
       python main.py
     envVars:
+      # --- Telegram API Bağlantı Bilgileri ---
+      # Botun ve sohbetin kimlik bilgileri.
       - key: TELEGRAM_BOT_TOKEN
         value: "8126426839:AAFUFI5b6Yh53qoq0hlDXDiwtgLKM529hl0"
         sync: false
       - key: TELEGRAM_CHAT_ID
         value: "-1002965909429"
         sync: false
+
+      # --- Finansal Veri Servisi Anahtarı ---
+      # Eğer CollectAPI gibi bir servis kullanıyorsanız.
       - key: COLLECTAPI_KEY
         value: "3SxnxfKhyEFQ7xzmKfF03F:6L8sRTM78MzwbUCT86IHLa"
         sync: false
+
+      # --- Bot Çalışma Modu ve Sıklık Ayarları ---
+      # Tarama yapılacak listeyi (ALL/CUSTOM) ve tarama sıklığını belirler.
       - key: SCAN_MODE
         value: "ALL"
         sync: false
@@ -25,6 +33,9 @@ services:
       - key: CHECK_EVERY_MIN
         value: "15"
         sync: false
+
+      # --- Analiz ve Filtreleme Parametreleri ---
+      # Hangi zaman dilimlerinin analiz edileceğini, minimum fiyat, hacim ve sinyal gücü koşullarını belirler.
       - key: TIMEFRAMES
         value: "1d,4h,1h,15m"
         sync: false
@@ -37,6 +48,9 @@ services:
       - key: MIN_SIGNAL_SCORE
         value: "1.25"
         sync: false
+
+      # --- Loglama Ayarları ---
+      # Loglama detay seviyesini belirler.
       - key: LOG_LEVEL
         value: "INFO"
         sync: false
