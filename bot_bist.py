@@ -103,7 +103,7 @@ STOCHRSI_K = int(os.getenv("STOCHRSI_K", "3"))
 STOCHRSI_D = int(os.getenv("STOCHRSI_D", "3"))
 MA_SHORT = int(os.getenv("MA_SHORT", "50"))
 MA_LONG = int(os.getenv("MA_LONG", "200"))
-MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "3.0"))
+MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "1.25"))
 
 LAST_SCAN_TIME: Optional[dt.datetime] = None
 START_TIME = time.time()
@@ -722,74 +722,23 @@ def calculate_sar(high: pd.Series, low: pd.Series, acceleration: float = 0.02, m
     return pd.Series(sar, index=high.index)
 
 def calculate_signal_strength(signal: SignalInfo) -> float:
-    score = 5.0
-    if signal.timeframe == '15m':
-        score += 2.5
-    elif signal.timeframe == '1h':
-        score += 1.5
-    elif signal.timeframe == '4h':
-        score += 0.5
-    if signal.direction == "BULLISH":
-        if signal.rsi < 30: score += 3.0
-        elif signal.rsi < 50: score += 1.0
-    else:
-        if signal.rsi > 70: score += 3.0
-        elif signal.rsi > 50: score += 1.0
-    if signal.volume_ratio > 4.0: score += 4.0
-    elif signal.volume_ratio > 3.0: score += 3.0
-    elif signal.volume_ratio > 2.0: score += 2.0
-    elif signal.volume_ratio > 1.5: score += 1.0
-    if (signal.direction == "BULLISH" and signal.macd_signal == "BULLISH") or \
-       (signal.direction == "BEARISH" and signal.macd_signal == "BEARISH"):
-        score += 2.5
-    if (signal.direction == "BULLISH" and signal.rsi > signal.rsi_ema) or \
-       (signal.direction == "BEARISH" and signal.rsi < signal.rsi_ema):
+    score = 0.0 # Başlangıç skorunu 0 yapın
+    
+    # RSI puanlaması: Aşırı alım/satım bölgelerine göre puan ekler.
+    # RSI < 35 ise +1.0, RSI < 25 ise +1.5 puan.
+    if signal.rsi < 35:
         score += 1.0
-    if signal.bb_position in ("NEAR_LOWER", "LOWER") and signal.direction == "BULLISH":
-        score += 0.5
-    if signal.bb_position in ("NEAR_UPPER", "UPPER") and signal.direction == "BEARISH":
-        score += 0.5
-    if signal.price > 10: score += 0.5
-    if signal.breakout_angle is not None:
-        angle_abs = abs(signal.breakout_angle)
-        if angle_abs > 30: score += 3.0
-        elif angle_abs > 15: score += 2.0
-        elif angle_abs > 5: score += 1.0
-    if signal.candle_formation:
-        if signal.candle_formation in ["Morning Star", "Three White Soldiers", "Bullish Engulfing"]:
-            score += 4.0
-        elif signal.candle_formation in ["Hammer", "Piercing Pattern", "Bullish Harami", "Tweezer Bottoms"]:
-            score += 3.0
-        elif signal.candle_formation in ["Inverted Hammer"]:
-            score += 2.0
-        if signal.candle_formation in ["Evening Star", "Three Black Crows", "Bearish Engulfing"]:
-            score += 4.0
-        elif signal.candle_formation in ["Shooting Star", "Dark Cloud Cover", "Bearish Harami", "Tweezer Tops"]:
-            score += 3.0
-        elif signal.candle_formation in ["Hanging Man"]:
-            score += 2.0
-    if signal.stochrsi_k is not None and signal.stochrsi_d is not None:
-        if signal.direction == "BULLISH" and signal.stochrsi_k > signal.stochrsi_d and signal.stochrsi_k < 20:
-            score += 2.0
-        elif signal.direction == "BEARISH" and signal.stochrsi_k < signal.stochrsi_d and signal.stochrsi_k > 80:
-            score += 2.0
-    if signal.ma_cross:
-        if signal.direction == "BULLISH" and signal.ma_cross == "GOLDEN_CROSS":
-            score += 4.0
-        elif signal.direction == "BEARISH" and signal.ma_cross == "DEATH_CROSS":
-            score += 4.0
-    if signal.tsi_value is not None:
-        if signal.direction == "BULLISH" and signal.tsi_value > 0:
-            score += 2.0
-        elif signal.direction == "BEARISH" and signal.tsi_value < 0:
-            score += 2.0
-    if signal.sar_status == 'BULLISH' and signal.direction == 'BULLISH':
-        score += 2.5
-    elif signal.sar_status == 'BEARISH' and signal.direction == 'BEARISH':
-        score += 2.5
-    return float(max(0.0, min(10.0, score)))
+        if signal.rsi < 25:
+            score += 0.5
 
+    # RSI Diverjans puanlaması: Pozitif diverjans için puan ekler.
+    # Diverjans değeri 1.0 ise bu bir pozitif diverjansdır.
+    if signal.multi_tf_score: # multi_tf_score aslında rsi diverjans skorunu taşıyor
+        divergence_score = float(signal.multi_tf_score)
+        if divergence_score > 0:
+            score += divergence_score # Puan 1.0 eklenir
 
+    return score
 
 # ------------------ Veri çekme ve analiz ------------------
 def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
