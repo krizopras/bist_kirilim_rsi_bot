@@ -2,13 +2,10 @@ services:
   - type: web
     name: bist-scanner-bot
     env: python
-    buildCommand: |
-      pip install -r requirements.txt
-    startCommand: |
-      python main.py
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot_bist.py  # ✅ Düzeltildi
     envVars:
-      # --- Telegram API Bağlantı Bilgileri ---
-      # Botun ve sohbetin kimlik bilgileri.
+      # Telegram Ayarları
       - key: TELEGRAM_BOT_TOKEN
         value: "8126426839:AAFUFI5b6Yh53qoq0hlDXDiwtgLKM529hl0"
         sync: false
@@ -16,26 +13,23 @@ services:
         value: "-1002965909429"
         sync: false
 
-      # --- Finansal Veri Servisi Anahtarı ---
-      # Eğer CollectAPI gibi bir servis kullanıyorsanız.
+      # API Anahtarı
       - key: COLLECTAPI_KEY
         value: "3SxnxfKhyEFQ7xzmKfF03F:6L8sRTM78MzwbUCT86IHLa"
         sync: false
 
-      # --- Bot Çalışma Modu ve Sıklık Ayarları ---
-      # Tarama yapılacak listeyi (ALL/CUSTOM) ve tarama sıklığını belirler.
+      # Bot Çalışma Ayarları
       - key: SCAN_MODE
         value: "ALL"
         sync: false
       - key: CUSTOM_TICKERS
-        value: ""
+        value: "GARAN,ASELS,THYAO"
         sync: false
       - key: CHECK_EVERY_MIN
         value: "15"
         sync: false
 
-      # --- Analiz ve Filtreleme Parametreleri ---
-      # Hangi zaman dilimlerinin analiz edileceğini, minimum fiyat, hacim ve sinyal gücü koşullarını belirler.
+      # Analiz Parametreleri
       - key: TIMEFRAMES
         value: "1d,4h,1h,15m"
         sync: false
@@ -48,9 +42,29 @@ services:
       - key: MIN_SIGNAL_SCORE
         value: "1.25"
         sync: false
+      - key: RSI_LEN
+        value: "22"
+        sync: false
+      - key: RSI_EMA
+        value: "66"
+        sync: false
+      - key: PIVOT_PERIOD
+        value: "10"
+        sync: false
+      - key: MIN_VOLUME_RATIO
+        value: "2.0"
+        sync: false
 
-      # --- Loglama Ayarları ---
-      # Loglama detay seviyesini belirler.
+      # Loglama ve Sistem
       - key: LOG_LEVEL
         value: "INFO"
+        sync: false
+      - key: LOG_FILE
+        value: "trading_bot.log"
+        sync: false
+      - key: PORT
+        value: "8080"
+        sync: false
+      - key: TZ
+        value: "Europe/Istanbul"
         sync: false
