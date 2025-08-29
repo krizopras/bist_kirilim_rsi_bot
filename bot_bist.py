@@ -467,7 +467,6 @@ async def send_signal_with_chart(sig: SignalInfo, df: pd.DataFrame, ind: Dict[st
     except Exception as e:
         logger.error(f"Sinyal gönderme hatası: {e}")
 
-# ----------------------- TARAMA VE RAPORLAMA -----------------------
 async def scan_and_report():
     global LAST_SCAN_TIME, DAILY_SIGNALS
     logger.info("⏳ CakmaUstad taraması başlıyor...")
@@ -481,26 +480,33 @@ async def scan_and_report():
     
     # aiohttp oturumunu başlat
     async with aiohttp.ClientSession() as session:
+        # Eş zamanlı istek sayısını 10 ile sınırlayan bir semafor oluştur
+        # Bu değeri CollectAPI'nin hız sınırına göre ayarlayabilirsiniz.
+        semaphore = asyncio.Semaphore(10)
+        
+        async def fetch_and_process(session, symbol, tf):
+            # Semafor kilidini alarak işlemin başlamasını bekle
+            async with semaphore:
+                signal, df, ind = await fetch_and_analyze_data(session, symbol, tf)
+                if signal and signal.direction == "BULLISH":
+                    symbol_key = f"{signal.symbol}_{signal.timeframe}"
+                    
+                    if symbol_key not in DAILY_SIGNALS:
+                        found_signals.append(signal)
+                        DAILY_SIGNALS[symbol_key] = asdict(signal)
+                        await send_signal_with_chart(signal, df, ind)
+                        logger.info(f"🎯 Sinyal: {signal.symbol} - {signal.timeframe} - Güç: {signal.strength_score:.1f}")
+                        await asyncio.sleep(1) # Telegram'ın hız limitini aşmamak için bekle
+
         tasks = []
-        # Her hisse ve zaman dilimi için bir görev oluştur
+        # Her hisse ve zaman dilimi için bir görev oluştur ve listeye ekle
         for symbol in TICKERS:
             for tf in TIMEFRAMES:
-                tasks.append(fetch_and_analyze_data(session, symbol, tf))
+                tasks.append(fetch_and_process(session, symbol, tf))
         
         # Tüm görevleri paralel olarak çalıştır
-        results = await asyncio.gather(*tasks)
-
-        for signal, df, ind in results:
-            if signal and signal.direction == "BULLISH":
-                symbol_key = f"{signal.symbol}_{signal.timeframe}"
-                
-                if symbol_key not in DAILY_SIGNALS:
-                    found_signals.append(signal)
-                    DAILY_SIGNALS[symbol_key] = asdict(signal)
-                    await send_signal_with_chart(signal, df, ind)
-                    logger.info(f"🎯 Sinyal: {signal.symbol} - {signal.timeframe} - Güç: {signal.strength_score:.1f}")
-                    await asyncio.sleep(1) # Telegram'ın hız limitini aşmamak için bekle
-
+        await asyncio.gather(*tasks)
+    
     logger.info(f"✅ Tarama tamamlandı. {len(found_signals)} sinyal bulundu.")
 
 async def run_scanner_periodically():
@@ -511,7 +517,6 @@ async def run_scanner_periodically():
         except Exception as e:
             logger.error(f"Tarama hatası: {e}")
             await asyncio.sleep(60)
-
 # ----------------------- SAĞLIK KONTROLÜ -----------------------
 class HealthHandler(web.View):
     async def get(self):
