@@ -760,10 +760,16 @@ def _standardize_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def fetch_history(symbol: str, yf_interval: str, period: str) -> pd.DataFrame:
-    stock = yf.Ticker(symbol)
-    df = stock.history(interval=yf_interval, period=period, auto_adjust=False)
-    return df
-
+    try:
+        stock = yf.Ticker(symbol)
+        df = stock.history(interval=yf_interval, period=period, auto_adjust=False)
+        if df.empty:
+            logger.warning(f"{symbol} için boş veri döndü. Atlanıyor.")
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        logger.error(f"{symbol} için veri çekme hatası: {e}")
+        return pd.DataFrame() # Hata durumunda boş DataFrame döndür
 def classify_bb_position(price: float, upper: float, lower: float, near_pct: float) -> str:
     if price >= upper: return "UPPER"
     if price <= lower: return "LOWER"
