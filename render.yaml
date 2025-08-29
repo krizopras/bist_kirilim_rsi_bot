@@ -40,7 +40,7 @@ services:
         value: "1d,4h,1h,15m"
         sync: false
       - key: MIN_PRICE
-        value: "5.0"
+        value: "1.0"
         sync: false
       - key: MIN_VOLUME_TRY
         value: "1000000"
