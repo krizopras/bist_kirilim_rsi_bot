@@ -151,7 +151,7 @@ else:
 
 CHECK_EVERY_MIN = int(os.getenv("CHECK_EVERY_MIN", "15"))
 TIMEFRAMES = [t.strip() for t in os.getenv("TIMEFRAMES", "").split(',') if t.strip()] or ["1h", "4h", "1d"]
-MIN_PRICE = float(os.getenv("MIN_PRICE", "5.0"))
+MIN_PRICE = float(os.getenv("MIN_PRICE", "1.0"))
 MIN_VOLUME_TRY = float(os.getenv("MIN_VOLUME_TRY", "1000000"))
 MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "2.0"))
 RSI_LEN = int(os.getenv("RSI_LEN", "22"))
