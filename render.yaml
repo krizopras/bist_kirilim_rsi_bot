@@ -3,9 +3,9 @@ services:
     name: bist-scanner-bot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot_bist.py  # ✅ Düzeltildi
+    startCommand: python bot_bist.py  # ✅ main.py yerine bot_bist.py
     envVars:
-      # Telegram Ayarları
+      # --- Telegram Ayarları ---
       - key: TELEGRAM_BOT_TOKEN
         value: "8126426839:AAFUFI5b6Yh53qoq0hlDXDiwtgLKM529hl0"
         sync: false
@@ -13,12 +13,12 @@ services:
         value: "-1002965909429"
         sync: false
 
-      # API Anahtarı
+      # --- API Anahtarı ---
       - key: COLLECTAPI_KEY
         value: "3SxnxfKhyEFQ7xzmKfF03F:6L8sRTM78MzwbUCT86IHLa"
         sync: false
 
-      # Bot Çalışma Ayarları
+      # --- Tarama ve Sıklık Ayarları ---
       - key: SCAN_MODE
         value: "ALL"
         sync: false
@@ -29,7 +29,7 @@ services:
         value: "15"
         sync: false
 
-      # Analiz Parametreleri
+      # --- Filtreleme ve Sinyal Ayarları ---
       - key: TIMEFRAMES
         value: "1d,4h,1h,15m"
         sync: false
@@ -42,6 +42,24 @@ services:
       - key: MIN_SIGNAL_SCORE
         value: "1.25"
         sync: false
+
+      # --- Loglama Ayarları ---
+      - key: LOG_LEVEL
+        value: "INFO"
+        sync: false
+
+      # --- RENDER ZORUNLU AYARLARI ---
+      - key: PORT
+        value: "8080"
+        sync: false
+      - key: TZ
+        value: "Europe/Istanbul"
+        sync: false
+
+      # --- EKSİK OLAN DİĞER AYARLAR ---
+      - key: LOG_FILE
+        value: "trading_bot.log"
+        sync: false
       - key: RSI_LEN
         value: "22"
         sync: false
@@ -53,18 +71,4 @@ services:
         sync: false
       - key: MIN_VOLUME_RATIO
         value: "2.0"
-        sync: false
-
-      # Loglama ve Sistem
-      - key: LOG_LEVEL
-        value: "INFO"
-        sync: false
-      - key: LOG_FILE
-        value: "trading_bot.log"
-        sync: false
-      - key: PORT
-        value: "8080"
-        sync: false
-      - key: TZ
-        value: "Europe/Istanbul"
         sync: false
