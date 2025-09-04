@@ -71,7 +71,7 @@ logging.basicConfig(
 logger = logging.getLogger("cakmaustad_scanner")
 
 # Rate limiting için semaphore
-CONCURRENT_REQUESTS = int(os.getenv("CONCURRENT_REQUESTS", "3"))
+CONCURRENT_REQUESTS = int(os.getenv("CONCURRENT_REQUESTS", "1"))
 request_semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
 
 
