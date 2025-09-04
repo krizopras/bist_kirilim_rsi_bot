@@ -56,6 +56,9 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 HEALTH_CHECK_PORT = int(os.getenv("PORT", 8080))
 IST_TZ = pytz.timezone('Europe/Istanbul')
 
+# 🔥 TEST modu için ayar
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
@@ -71,6 +74,7 @@ logger = logging.getLogger("cakmaustad_scanner")
 CONCURRENT_REQUESTS = int(os.getenv("CONCURRENT_REQUESTS", "3"))
 request_semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
 
+
 # ----------------------- TARAMA AYARLARI -----------------------
 MARKET_OPEN_HOUR = 9
 MARKET_CLOSE_HOUR = 18
@@ -82,8 +86,12 @@ LUNCH_END_MINUTE = 0
 
 def is_market_hours() -> bool:
     """Geliştirilmiş borsa saatleri kontrolü"""
-    now_ist = dt.datetime.now(IST_TZ)
-    
+    if TEST_MODE:
+        logger.debug("TEST_MODE aktif - piyasa hep açık kabul ediliyor")
+        return True
+
+    now_ist = dt.datetime.now(IST_TZ)   
+
     # Hafta sonu kontrolü
     if now_ist.weekday() >= 5: 
         return False
