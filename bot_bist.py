@@ -68,7 +68,7 @@ logging.basicConfig(
 logger = logging.getLogger("cakmaustad_scanner")
 
 # Rate limiting için semaphore
-CONCURRENT_REQUESTS = int(os.getenv("CONCURRENT_REQUESTS", "5"))
+CONCURRENT_REQUESTS = int(os.getenv("CONCURRENT_REQUESTS", "3"))
 request_semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
 
 # ----------------------- TARAMA AYARLARI -----------------------
@@ -403,6 +403,11 @@ def calculate_confidence_level(signal: SignalInfo, market_conditions: Dict[str, 
     return min(1.0, confidence)
 
 # ----------------------- TRADINGVIEW VERİ ÇEKME FONKSİYONLARI -----------------------
+
+# Global rate limiting için
+LAST_TRADINGVIEW_REQUEST = 0
+MIN_TRADINGVIEW_INTERVAL = 1.5  # Minimum 1.5 saniye bekleme
+
 def get_tradingview_interval(timeframe: str) -> Interval:
     """TradingView zaman dilimini Interval nesnesine dönüştürür"""
     interval_map = {
@@ -419,19 +424,58 @@ def get_tradingview_interval(timeframe: str) -> Interval:
     }
     return interval_map.get(timeframe, Interval.INTERVAL_1_HOUR)
 
+async def tradingview_rate_limit():
+    """TradingView için global rate limiting"""
+    global LAST_TRADINGVIEW_REQUEST
+    current_time = time.time()
+    time_since_last = current_time - LAST_TRADINGVIEW_REQUEST
+    
+    if time_since_last < MIN_TRADINGVIEW_INTERVAL:
+        wait_time = MIN_TRADINGVIEW_INTERVAL - time_since_last
+        await asyncio.sleep(wait_time)
+    
+    LAST_TRADINGVIEW_REQUEST = time.time()
+
 async def fetch_tradingview_data_with_retry(symbol: str, timeframe: str, max_retries: int = MAX_RETRY_ATTEMPTS) -> Optional[Dict[str, Any]]:
     """Retry mekanizmalı TradingView veri çekme"""
+    
+    # Başarısız sembolleri tekrar deneme sıklığını azalt
+    symbol_key = f"{symbol}_{timeframe}"
+    if symbol_key in FAILED_SYMBOLS:
+        # Her 10 taramada bir başarısız sembolleri tekrar dene
+        import random
+        if random.randint(1, 10) != 1:
+            return None
+    
     for attempt in range(max_retries):
         try:
             result = await fetch_tradingview_data(symbol, timeframe)
-            if result and validate_data_integrity(result):
+            if result and validate_data_integrity_enhanced(result, symbol):
+                # Başarılı olursa FAILED_SYMBOLS'dan kaldır
+                FAILED_SYMBOLS.discard(symbol_key)
                 return result
+            else:
+                logger.debug(f"Veri doğrulama başarısız - {symbol} (Deneme {attempt + 1})")
+                
         except Exception as e:
-            logger.warning(f"TradingView veri çekme denemesi {attempt + 1}/{max_retries} başarısız - {symbol}: {e}")
+            error_msg = str(e)
+            
+            # Hata türüne göre özel işlem
+            if "Too many requests" in error_msg or "rate limit" in error_msg.lower():
+                logger.warning(f"Rate limit aşıldı - {symbol}, uzun bekleme")
+                await asyncio.sleep(10)  # Rate limit için uzun bekleme
+            elif "Symbol not found" in error_msg:
+                logger.warning(f"Sembol bulunamadı: {symbol}, kalıcı olarak başarısız işaretleniyor")
+                FAILED_SYMBOLS.add(symbol_key)
+                return None
+            else:
+                logger.warning(f"TradingView veri çekme denemesi {attempt + 1}/{max_retries} başarısız - {symbol}: {error_msg}")
+            
             if attempt < max_retries - 1:
-                await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff
+                wait_time = min(30, (2 ** attempt) * 1.5)  # Max 30 saniye bekleme
+                await asyncio.sleep(wait_time)
     
-    FAILED_SYMBOLS.add(f"{symbol}_{timeframe}")
+    FAILED_SYMBOLS.add(symbol_key)
     logger.error(f"TradingView'dan {symbol} için {max_retries} denemede veri çekilemedi")
     return None
 
@@ -439,73 +483,214 @@ async def fetch_tradingview_data(symbol: str, timeframe: str) -> Optional[Dict[s
     """Rate limiting ile TradingView'dan hisse senedi verisi çeker"""
     async with request_semaphore:
         try:
-            # Rate limiting
-            await asyncio.sleep(0.2)
+            # Global rate limiting uygula
+            await tradingview_rate_limit()
             
             interval = get_tradingview_interval(timeframe)
             
+            # .IS suffix kontrolü ve ekleme
+            tv_symbol = f"{symbol}.IS" if not symbol.endswith('.IS') else symbol
+            
+            logger.debug(f"TradingView'dan veri çekiliyor: {tv_symbol} - {timeframe}")
+            
             handler = TA_Handler(
-                symbol=symbol,
+                symbol=tv_symbol,
                 exchange="BIST",
                 screener="turkey",
                 interval=interval,
-                timeout=15
+                timeout=45  # Timeout daha da artırıldı
             )
             
             analysis = handler.get_analysis()
             
+            if not analysis:
+                logger.warning(f"TradingView'dan boş analiz döndü: {tv_symbol}")
+                return None
+            
+            if not analysis.indicators:
+                logger.warning(f"TradingView'dan boş indikatörler döndü: {tv_symbol}")
+                return None
+            
             # TradingView verilerini işle
             indicators = analysis.indicators
             
-            # Veri doğrulama
+            # Veri doğrulama - temel alanları kontrol et
             close_price = indicators.get('close')
             volume = indicators.get('volume')
             rsi = indicators.get('RSI')
             
-            if not all([close_price, volume, rsi]):
-                logger.warning(f"Eksik veri - {symbol}: Close={close_price}, Volume={volume}, RSI={rsi}")
+            # Kritik verilerin varlığını kontrol et
+            if not close_price or close_price <= 0:
+                logger.warning(f"Geçersiz kapanış fiyatı - {tv_symbol}: {close_price}")
                 return None
+                
+            if not volume or volume < 0:
+                logger.warning(f"Geçersiz hacim verisi - {tv_symbol}: {volume}")
+                # Hacim 0 ise tahmini hacim ata
+                volume = close_price * 50000  # Tahmini günlük hacim
             
-            # EMA değerlerini al (farklı periyotları dene)
-            ema_value = (indicators.get('EMA50') or 
-                        indicators.get('EMA20') or 
-                        indicators.get('EMA10') or 
-                        close_price)
+            if not rsi or rsi < 0 or rsi > 100:
+                logger.warning(f"Geçersiz RSI verisi - {tv_symbol}: {rsi}")
+                rsi = 50.0  # Nötr RSI değeri
+            
+            # EMA değerlerini al (çoklu kaynak deneme)
+            ema_candidates = [
+                indicators.get(f'EMA{RSI_EMA_LEN}'),  # Belirlenen EMA uzunluğu
+                indicators.get('EMA50'),
+                indicators.get('EMA21'), 
+                indicators.get('EMA20'),
+                indicators.get('EMA10'),
+                indicators.get('SMA20'),
+                indicators.get('SMA10')
+            ]
+            
+            ema_value = None
+            for candidate in ema_candidates:
+                if candidate and candidate > 0:
+                    ema_value = candidate
+                    break
+            
+            if not ema_value:
+                ema_value = close_price  # Son çare olarak kapanış fiyatını kullan
+            
+            # OHLC verilerini güvenli şekilde al
+            open_price = indicators.get('open') or close_price
+            high_price = indicators.get('high') or close_price
+            low_price = indicators.get('low') or close_price
+            
+            # OHLC mantık kontrolü
+            if high_price < close_price:
+                high_price = close_price
+            if low_price > close_price:
+                low_price = close_price
+            if open_price <= 0:
+                open_price = close_price
             
             result = {
-                'Open': safe_float_convert(indicators.get('open'), close_price),
-                'High': safe_float_convert(indicators.get('high'), close_price),
-                'Low': safe_float_convert(indicators.get('low'), close_price),
+                'Open': safe_float_convert(open_price, close_price),
+                'High': safe_float_convert(high_price, close_price),
+                'Low': safe_float_convert(low_price, close_price),
                 'Close': safe_float_convert(close_price),
                 'Volume': safe_float_convert(volume),
                 'RSI': safe_float_convert(rsi, 50.0),
                 'EMA': safe_float_convert(ema_value, close_price),
                 'MACD.macd': safe_float_convert(indicators.get('MACD.macd')),
                 'MACD.signal': safe_float_convert(indicators.get('MACD.signal')),
-                'ADX': safe_float_convert(indicators.get('ADX')),
+                'ADX': safe_float_convert(indicators.get('ADX'), 25.0),
                 'CCI': safe_float_convert(indicators.get('CCI')),
+                'BB.upper': safe_float_convert(indicators.get('BB.upper'), close_price * 1.02),
+                'BB.lower': safe_float_convert(indicators.get('BB.lower'), close_price * 0.98),
+                'BB.middle': safe_float_convert(indicators.get('BB.middle'), close_price),
                 'summary': analysis.summary.get('RECOMMENDATION', 'NEUTRAL') if analysis.summary else 'NEUTRAL',
                 'oscillators': analysis.oscillators.get('RECOMMENDATION', 'NEUTRAL') if analysis.oscillators else 'NEUTRAL',
                 'moving_averages': analysis.moving_averages.get('RECOMMENDATION', 'NEUTRAL') if analysis.moving_averages else 'NEUTRAL'
             }
             
+            logger.debug(f"TradingView veri başarılı: {tv_symbol} - Close: {close_price:.3f}, RSI: {rsi:.1f}")
             return result
             
         except Exception as e:
-            logger.error(f"TradingView veri çekme hatası {symbol} - {timeframe}: {e}")
+            error_msg = str(e)
+            
+            # Spesifik hata türleri için özel loglama
+            if "Too many requests" in error_msg:
+                logger.error(f"TradingView rate limit aşıldı - {symbol}")
+            elif "Symbol not found" in error_msg or "Invalid symbol" in error_msg:
+                logger.error(f"TradingView'da geçersiz sembol - {symbol}")
+            elif "timeout" in error_msg.lower():
+                logger.error(f"TradingView timeout - {symbol}")
+            elif "Connection" in error_msg or "Network" in error_msg:
+                logger.error(f"TradingView bağlantı hatası - {symbol}")
+            else:
+                logger.error(f"TradingView genel hata {symbol} - {timeframe}: {error_msg}")
+            
             return None
+
+def validate_data_integrity_enhanced(data: Dict[str, Any], symbol: str) -> bool:
+    """Geliştirilmiş veri bütünlüğü kontrolü"""
+    try:
+        required_fields = ['Close', 'Volume', 'RSI']
+        
+        for field in required_fields:
+            if field not in data or data[field] is None:
+                logger.debug(f"Eksik alan {symbol}: {field}")
+                return False
+                
+            try:
+                value = float(data[field])
+                
+                # Alan-spesifik doğrulamalar
+                if field == 'Close':
+                    if value <= 0 or value > 20000:  # BIST için makul fiyat aralığı
+                        logger.debug(f"Mantıksız fiyat {symbol}: {value}")
+                        return False
+                elif field == 'Volume':
+                    if value < 0:  # Negatif hacim kabul edilmez
+                        logger.debug(f"Negatif hacim {symbol}: {value}")
+                        return False
+                elif field == 'RSI':
+                    if value < 0 or value > 100:  # RSI 0-100 arası olmalı
+                        logger.debug(f"RSI aralık dışı {symbol}: {value}")
+                        return False
+                        
+            except (ValueError, TypeError):
+                logger.debug(f"Sayıya dönüştürülemeyen değer {symbol} - {field}: {data[field]}")
+                return False
+        
+        # Ek mantık kontrolleri
+        try:
+            high = float(data.get('High', data['Close']))
+            low = float(data.get('Low', data['Close']))
+            close = float(data['Close'])
+            
+            # OHLC mantık kontrolü
+            if high < close or low > close:
+                logger.debug(f"OHLC mantık hatası {symbol}: H={high}, L={low}, C={close}")
+                return False
+                
+        except:
+            pass  # OHLC kontrolü opsiyonel
+        
+        return True
+        
+    except Exception as e:
+        logger.warning(f"Veri doğrulama hatası {symbol}: {e}")
+        return False
 
 def calculate_volume_metrics(current_volume: float, symbol: str) -> Tuple[float, float]:
     """Hacim metriklerini hesapla"""
-    # Basitleştirilmiş hacim oranı hesaplama
-    # Gerçek uygulamada geçmiş hacim verilerini kullanmalısınız
+    # Sembol bazında ortalama hacim tahminleri (geliştirilebilir)
+    symbol_volume_multipliers = {
+        'AKBNK': 0.6, 'GARAN': 0.6, 'ISCTR': 0.7, 'THYAO': 0.8, 'ASELS': 0.7,
+        'SISE': 0.8, 'KOZAL': 0.9, 'KCHOL': 0.7, 'ARCLK': 0.8, 'TUPRS': 0.8
+    }
     
-    # Ortalama hacim tahmini (symbol bazında değişkenlik gösterebilir)
-    estimated_avg_volume = current_volume * 0.7  # Basit tahmin
+    # Sembol-spesifik çarpan veya varsayılan değer
+    multiplier = symbol_volume_multipliers.get(symbol, 0.7)
+    
+    # Ortalama hacim tahmini
+    estimated_avg_volume = current_volume * multiplier
     volume_ratio = current_volume / max(estimated_avg_volume, 1.0)
     
     return volume_ratio, estimated_avg_volume
 
+async def test_tradingview_connectivity():
+    """TradingView bağlantısını test et"""
+    test_symbols = ["AKBNK", "GARAN", "ISCTR"]
+    
+    logger.info("TradingView bağlantısı test ediliyor...")
+    
+    for symbol in test_symbols:
+        try:
+            data = await fetch_tradingview_data(symbol, "1d")
+            if data and data.get('Close'):
+                logger.info(f"TradingView test başarılı: {symbol} = {data['Close']:.3f} TL")
+                return True
+        except Exception as e:
+            logger.warning(f"TradingView test hatası {symbol}: {e}")
+    
+    logger.error("TradingView bağlantı testi başarısız!")
+    return False
 # ----------------------- ANA ANALİZ FONKSİYONU -----------------------
 async def fetch_and_analyze_data(session: aiohttp.ClientSession, symbol: str, timeframe: str) -> Tuple[Optional["SignalInfo"], Optional[pd.DataFrame], Optional[Dict[str, Any]]]:
     """Geliştirilmiş hisse senedi analizi"""
