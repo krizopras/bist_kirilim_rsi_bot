@@ -496,106 +496,115 @@ async def fetch_tradingview_data(symbol: str, timeframe: str) -> Optional[Dict[s
             
             interval = get_tradingview_interval(timeframe)
             
-            # .IS suffix kontrolü ve ekleme
-            tv_symbol = f"{symbol}.IS" if not symbol.endswith('.IS') else symbol
-            
-            logger.debug(f"TradingView'dan veri çekiliyor: {tv_symbol} - {timeframe}")
-            
-            handler = TA_Handler(
-                symbol=tv_symbol,
-                exchange="BIST",
-                screener="turkey",
-                interval=interval,
-                timeout=45  # Timeout daha da artırıldı
-            )
-            
-            analysis = handler.get_analysis()
-            
-            if not analysis:
-                logger.warning(f"TradingView'dan boş analiz döndü: {tv_symbol}")
-                return None
-            
-            if not analysis.indicators:
-                logger.warning(f"TradingView'dan boş indikatörler döndü: {tv_symbol}")
-                return None
-            
-            # TradingView verilerini işle
-            indicators = analysis.indicators
-            
-            # Veri doğrulama - temel alanları kontrol et
-            close_price = indicators.get('close')
-            volume = indicators.get('volume')
-            rsi = indicators.get('RSI')
-            
-            # Kritik verilerin varlığını kontrol et
-            if not close_price or close_price <= 0:
-                logger.warning(f"Geçersiz kapanış fiyatı - {tv_symbol}: {close_price}")
-                return None
-                
-            if not volume or volume < 0:
-                logger.warning(f"Geçersiz hacim verisi - {tv_symbol}: {volume}")
-                # Hacim 0 ise tahmini hacim ata
-                volume = close_price * 50000  # Tahmini günlük hacim
-            
-            if not rsi or rsi < 0 or rsi > 100:
-                logger.warning(f"Geçersiz RSI verisi - {tv_symbol}: {rsi}")
-                rsi = 50.0  # Nötr RSI değeri
-            
-            # EMA değerlerini al (çoklu kaynak deneme)
-            ema_candidates = [
-                indicators.get(f'EMA{RSI_EMA_LEN}'),  # Belirlenen EMA uzunluğu
-                indicators.get('EMA50'),
-                indicators.get('EMA21'), 
-                indicators.get('EMA20'),
-                indicators.get('EMA10'),
-                indicators.get('SMA20'),
-                indicators.get('SMA10')
+            # Farklı sembol formatlarını dene
+            symbol_formats = [
+                f"BIST:{symbol}",     # Exchange prefix format
+                f"{symbol}.IS",       # Standard suffix  
+                f"{symbol}",          # Sadece sembol
+                f"BORSA:{symbol}"     # Alternatif exchange prefix
             ]
             
-            ema_value = None
-            for candidate in ema_candidates:
-                if candidate and candidate > 0:
-                    ema_value = candidate
-                    break
+            last_error = None
             
-            if not ema_value:
-                ema_value = close_price  # Son çare olarak kapanış fiyatını kullan
+            for tv_symbol in symbol_formats:
+                try:
+                    logger.debug(f"TradingView format denemesi: {tv_symbol}")
+                    
+                    handler = TA_Handler(
+                        symbol=tv_symbol,
+                        exchange="BIST",
+                        screener="turkey",
+                        interval=interval,
+                        timeout=45
+                    )
+                    
+                    analysis = handler.get_analysis()
+                    
+                    if analysis and analysis.indicators and analysis.indicators.get('close'):
+                        # Bu format çalıştı, veriyi işle
+                        indicators = analysis.indicators
+                        
+                        close_price = indicators.get('close')
+                        volume = indicators.get('volume')
+                        rsi = indicators.get('RSI')
+                        
+                        # Kritik verilerin varlığını kontrol et
+                        if not close_price or close_price <= 0:
+                            logger.debug(f"Format {tv_symbol} geçersiz fiyat verdi: {close_price}")
+                            continue  # Bu format veri vermiyor, diğerini dene
+                            
+                        if not volume or volume < 0:
+                            volume = close_price * 50000  # Tahmini günlük hacim
+                        
+                        if not rsi or rsi < 0 or rsi > 100:
+                            rsi = 50.0  # Nötr RSI değeri
+                        
+                        # EMA değerlerini al (çoklu kaynak deneme)
+                        ema_candidates = [
+                            indicators.get(f'EMA{RSI_EMA_LEN}'),
+                            indicators.get('EMA50'),
+                            indicators.get('EMA21'), 
+                            indicators.get('EMA20'),
+                            indicators.get('EMA10'),
+                            indicators.get('SMA20'),
+                            indicators.get('SMA10')
+                        ]
+                        
+                        ema_value = close_price  # Varsayılan
+                        for candidate in ema_candidates:
+                            if candidate and candidate > 0:
+                                ema_value = candidate
+                                break
+                        
+                        # OHLC verilerini güvenli şekilde al
+                        open_price = indicators.get('open') or close_price
+                        high_price = indicators.get('high') or close_price
+                        low_price = indicators.get('low') or close_price
+                        
+                        # OHLC mantık kontrolü
+                        if high_price < close_price:
+                            high_price = close_price
+                        if low_price > close_price:
+                            low_price = close_price
+                        if open_price <= 0:
+                            open_price = close_price
+                        
+                        result = {
+                            'Open': safe_float_convert(open_price, close_price),
+                            'High': safe_float_convert(high_price, close_price),
+                            'Low': safe_float_convert(low_price, close_price),
+                            'Close': safe_float_convert(close_price),
+                            'Volume': safe_float_convert(volume),
+                            'RSI': safe_float_convert(rsi, 50.0),
+                            'EMA': safe_float_convert(ema_value, close_price),
+                            'MACD.macd': safe_float_convert(indicators.get('MACD.macd')),
+                            'MACD.signal': safe_float_convert(indicators.get('MACD.signal')),
+                            'ADX': safe_float_convert(indicators.get('ADX'), 25.0),
+                            'CCI': safe_float_convert(indicators.get('CCI')),
+                            'BB.upper': safe_float_convert(indicators.get('BB.upper'), close_price * 1.02),
+                            'BB.lower': safe_float_convert(indicators.get('BB.lower'), close_price * 0.98),
+                            'BB.middle': safe_float_convert(indicators.get('BB.middle'), close_price),
+                            'summary': analysis.summary.get('RECOMMENDATION', 'NEUTRAL') if analysis.summary else 'NEUTRAL',
+                            'oscillators': analysis.oscillators.get('RECOMMENDATION', 'NEUTRAL') if analysis.oscillators else 'NEUTRAL',
+                            'moving_averages': analysis.moving_averages.get('RECOMMENDATION', 'NEUTRAL') if analysis.moving_averages else 'NEUTRAL'
+                        }
+                        
+                        logger.debug(f"Başarılı format: {symbol} -> {tv_symbol} (Fiyat: {close_price:.3f})")
+                        return result
+                
+                except Exception as e:
+                    last_error = str(e)
+                    if any(x in str(e).lower() for x in ["symbol not found", "exchange", "invalid symbol"]):
+                        logger.debug(f"Format {tv_symbol} çalışmadı: {e}")
+                        continue  # Bu format çalışmadı, diğerini dene
+                    else:
+                        # Farklı bir hata türü
+                        logger.warning(f"Format {tv_symbol} farklı hata verdi: {e}")
+                        break
             
-            # OHLC verilerini güvenli şekilde al
-            open_price = indicators.get('open') or close_price
-            high_price = indicators.get('high') or close_price
-            low_price = indicators.get('low') or close_price
-            
-            # OHLC mantık kontrolü
-            if high_price < close_price:
-                high_price = close_price
-            if low_price > close_price:
-                low_price = close_price
-            if open_price <= 0:
-                open_price = close_price
-            
-            result = {
-                'Open': safe_float_convert(open_price, close_price),
-                'High': safe_float_convert(high_price, close_price),
-                'Low': safe_float_convert(low_price, close_price),
-                'Close': safe_float_convert(close_price),
-                'Volume': safe_float_convert(volume),
-                'RSI': safe_float_convert(rsi, 50.0),
-                'EMA': safe_float_convert(ema_value, close_price),
-                'MACD.macd': safe_float_convert(indicators.get('MACD.macd')),
-                'MACD.signal': safe_float_convert(indicators.get('MACD.signal')),
-                'ADX': safe_float_convert(indicators.get('ADX'), 25.0),
-                'CCI': safe_float_convert(indicators.get('CCI')),
-                'BB.upper': safe_float_convert(indicators.get('BB.upper'), close_price * 1.02),
-                'BB.lower': safe_float_convert(indicators.get('BB.lower'), close_price * 0.98),
-                'BB.middle': safe_float_convert(indicators.get('BB.middle'), close_price),
-                'summary': analysis.summary.get('RECOMMENDATION', 'NEUTRAL') if analysis.summary else 'NEUTRAL',
-                'oscillators': analysis.oscillators.get('RECOMMENDATION', 'NEUTRAL') if analysis.oscillators else 'NEUTRAL',
-                'moving_averages': analysis.moving_averages.get('RECOMMENDATION', 'NEUTRAL') if analysis.moving_averages else 'NEUTRAL'
-            }
-            
-            logger.debug(f"TradingView veri başarılı: {tv_symbol} - Close: {close_price:.3f}, RSI: {rsi:.1f}")
-            return result
+            # Hiçbir format çalışmadı
+            logger.error(f"TradingView'da {symbol} için hiçbir format çalışmadı. Son hata: {last_error}")
+            return None
             
         except Exception as e:
             error_msg = str(e)
@@ -603,8 +612,6 @@ async def fetch_tradingview_data(symbol: str, timeframe: str) -> Optional[Dict[s
             # Spesifik hata türleri için özel loglama
             if "Too many requests" in error_msg:
                 logger.error(f"TradingView rate limit aşıldı - {symbol}")
-            elif "Symbol not found" in error_msg or "Invalid symbol" in error_msg:
-                logger.error(f"TradingView'da geçersiz sembol - {symbol}")
             elif "timeout" in error_msg.lower():
                 logger.error(f"TradingView timeout - {symbol}")
             elif "Connection" in error_msg or "Network" in error_msg:
@@ -613,7 +620,6 @@ async def fetch_tradingview_data(symbol: str, timeframe: str) -> Optional[Dict[s
                 logger.error(f"TradingView genel hata {symbol} - {timeframe}: {error_msg}")
             
             return None
-
 def validate_data_integrity_enhanced(data: Dict[str, Any], symbol: str) -> bool:
     """Geliştirilmiş veri bütünlüğü kontrolü"""
     try:
