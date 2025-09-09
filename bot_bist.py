@@ -30,6 +30,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from dotenv import load_dotenv
+import requests
 
 
 # Karakter kodlama düzeltmesi
@@ -48,6 +49,10 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/"
+# --- DEBUG: TELEGRAM BAĞLANTI KONTROLÜ ---
+
+# Debug kodunu mevcut kodunuzun TELEGRAM_API_URL satırından sonra ekleyin
+
 # --- DEBUG: TELEGRAM BAĞLANTI KONTROLÜ ---
 import requests
 
