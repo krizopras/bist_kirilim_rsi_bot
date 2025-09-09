@@ -576,6 +576,27 @@ async def test_yfinance_connectivity():
     logger.error("Yahoo Finance bağlantı testi başarısız!")
     return False
 
+import logging
+from typing import Tuple
+
+logger = logging.getLogger(__name__)
+
+def calculate_volume_metrics(last_volume: float, symbol: str) -> Tuple[float, float]:
+    """
+    Belirtilen hisse için hacim oranını ve ortalama hacmi hesaplar.
+    """
+    try:
+        # Daha iyi bir yaklaşım için, hissenin geçmiş verilerini kullanarak
+        # ortalama hacmi dinamik olarak hesaplayabilirsiniz.
+        avg_volume = 1_000_000.0  # Şimdilik sabit bir değer
+        
+        volume_ratio = last_volume / avg_volume if avg_volume > 0 else 0.0
+        
+        return (volume_ratio, avg_volume)
+    except Exception as e:
+        logger.error(f"Hacim metriği hesaplanırken hata oluştu: {e}")
+        return (0.0, 0.0)
+
 # ----------------------- ANA ANALİZ FONKSİYONU -----------------------
 async def fetch_and_analyze_data(session: aiohttp.ClientSession, symbol: str, timeframe: str) -> Tuple[Optional["SignalInfo"], Optional[pd.DataFrame], Optional[Dict[str, Any]]]:
     """Geliştirilmiş hisse senedi analizi (Yahoo Finance entegrasyonlu)"""
