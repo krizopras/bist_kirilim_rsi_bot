@@ -1,74 +1,30 @@
 services:
-  - type: web
-    name: bist-scanner-bot
+  - type: worker
+    name: cakmaustad-bot
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot_bist.py  # ✅ main.py yerine bot_bist.py
+    buildCommand: |
+      pip install --no-cache-dir tradingview_ta yfinance aiohttp python-dotenv pandas numpy pytz
+    startCommand: python bot_bist.py
     envVars:
-      # --- Telegram Ayarları ---
       - key: TELEGRAM_BOT_TOKEN
-        value: "8126426839:AAFUFI5b6Yh53qoq0hlDXDiwtgLKM529hl0"
-        sync: false
+        value: ${TELEGRAM_BOT_TOKEN}
       - key: TELEGRAM_CHAT_ID
-        value: "-1002965909429"
-        sync: false
-
-      # --- API Anahtarı ---
-      - key: COLLECTAPI_KEY
-        value: "3SxnxfKhyEFQ7xzmKfF03F:6L8sRTM78MzwbUCT86IHLa"
-        sync: false
-
-      # --- Tarama ve Sıklık Ayarları ---
+        value: ${TELEGRAM_CHAT_ID}
       - key: SCAN_MODE
-        value: "ALL"
-        sync: false
+        value: ${SCAN_MODE}
       - key: CUSTOM_TICKERS
-        value: "GARAN,ASELS,THYAO"
-        sync: false
+        value: ${CUSTOM_TICKERS}
       - key: CHECK_EVERY_MIN
-        value: "15"
-        sync: false
-
-      # --- Filtreleme ve Sinyal Ayarları ---
+        value: ${CHECK_EVERY_MIN}
       - key: TIMEFRAMES
-        value: "1d,4h,1h,15m"
-        sync: false
+        value: ${TIMEFRAMES}
       - key: MIN_PRICE
-        value: "1.0"
-        sync: false
+        value: ${MIN_PRICE}
       - key: MIN_VOLUME_TRY
-        value: "1000000"
-        sync: false
+        value: ${MIN_VOLUME_TRY}
       - key: MIN_SIGNAL_SCORE
-        value: "1.15"
-        sync: false
-
-      # --- Loglama Ayarları ---
+        value: ${MIN_SIGNAL_SCORE}
       - key: LOG_LEVEL
-        value: "INFO"
-        sync: false
-
-      # --- RENDER ZORUNLU AYARLARI ---
-      - key: PORT
-        value: "8080"
-        sync: false
-      - key: TZ
-        value: "Europe/Istanbul"
-        sync: false
-
-      # --- EKSİK OLAN DİĞER AYARLAR ---
-      - key: LOG_FILE
-        value: "trading_bot.log"
-        sync: false
-      - key: RSI_LEN
-        value: "22"
-        sync: false
-      - key: RSI_EMA
-        value: "66"
-        sync: false
-      - key: PIVOT_PERIOD
-        value: "10"
-        sync: false
-      - key: MIN_VOLUME_RATIO
-        value: "2.0"
-        sync: false
+        value: ${LOG_LEVEL}
+      - key: CONCURRENT_REQUESTS
+        value: ${CONCURRENT_REQUESTS}
