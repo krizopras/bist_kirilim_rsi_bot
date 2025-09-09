@@ -48,6 +48,91 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/"
+# --- DEBUG: TELEGRAM BAĞLANTI KONTROLÜ ---
+import requests
+
+def debug_telegram_connection():
+    """Render'da Telegram bağlantısını debug et"""
+    logger.info("=== TELEGRAM DEBUG BAŞLADI ===")
+    
+    # Ortam değişkenlerini kontrol et
+    logger.info(f"TELEGRAM_BOT_TOKEN mevcut: {'✅' if TELEGRAM_BOT_TOKEN else '❌'}")
+    logger.info(f"TELEGRAM_CHAT_ID mevcut: {'✅' if TELEGRAM_CHAT_ID else '❌'}")
+    
+    if TELEGRAM_BOT_TOKEN:
+        # Token formatını kontrol et (güvenli şekilde)
+        if ':' in TELEGRAM_BOT_TOKEN:
+            parts = TELEGRAM_BOT_TOKEN.split(':')
+            logger.info(f"Token formatı: {parts[0]}:***{parts[1][-4:]}")
+            logger.info(f"Token uzunluğu: {len(TELEGRAM_BOT_TOKEN)} karakter")
+        else:
+            logger.error("❌ Token ':' karakteri içermiyor - format hatası!")
+    
+    if TELEGRAM_CHAT_ID:
+        logger.info(f"Chat ID: {TELEGRAM_CHAT_ID}")
+        logger.info(f"Chat ID tipi: {type(TELEGRAM_CHAT_ID)}")
+    
+    logger.info(f"API URL: {TELEGRAM_API_URL}")
+    
+    # Bot token test et
+    try:
+        logger.info("Bot token test ediliyor...")
+        response = requests.get(f"{TELEGRAM_API_URL}getMe", timeout=10)
+        logger.info(f"getMe Status Code: {response.status_code}")
+        
+        if response.status_code == 200:
+            bot_info = response.json()
+            if bot_info.get('ok'):
+                result = bot_info['result']
+                logger.info(f"✅ Bot aktif: @{result.get('username')}")
+                logger.info(f"Bot adı: {result.get('first_name')}")
+                logger.info(f"Bot ID: {result.get('id')}")
+            else:
+                logger.error(f"❌ Bot response hatası: {bot_info}")
+        elif response.status_code == 401:
+            logger.error("❌ 401 Unauthorized - Bot token geçersiz!")
+        elif response.status_code == 404:
+            logger.error("❌ 404 Not Found - Bot bulunamadı!")
+        else:
+            logger.error(f"❌ HTTP {response.status_code}: {response.text}")
+            
+    except requests.exceptions.Timeout:
+        logger.error("❌ Timeout - Telegram API'ye erişim yavaş")
+    except requests.exceptions.ConnectionError:
+        logger.error("❌ Bağlantı hatası - İnternet bağlantısını kontrol edin")
+    except Exception as e:
+        logger.error(f"❌ Beklenmeyen hata: {e}")
+    
+    # Chat ID test et (eğer bot token çalışıyorsa)
+    if TELEGRAM_CHAT_ID:
+        try:
+            logger.info("Chat ID test ediliyor...")
+            test_data = {
+                'chat_id': TELEGRAM_CHAT_ID,
+                'text': '🔧 Render Debug Test - Bot çalışıyor!'
+            }
+            response = requests.post(f"{TELEGRAM_API_URL}sendMessage", json=test_data, timeout=10)
+            logger.info(f"sendMessage Status Code: {response.status_code}")
+            
+            if response.status_code == 200:
+                logger.info("✅ Test mesajı başarıyla gönderildi!")
+            elif response.status_code == 400:
+                logger.error(f"❌ 400 Bad Request: {response.text}")
+                logger.error("Chat ID formatı yanlış olabilir")
+            elif response.status_code == 403:
+                logger.error("❌ 403 Forbidden - Bot engellenmiş veya chat'e erişim yok")
+            elif response.status_code == 404:
+                logger.error("❌ 404 Not Found - Chat ID bulunamadı")
+            else:
+                logger.error(f"❌ HTTP {response.status_code}: {response.text}")
+                
+        except Exception as e:
+            logger.error(f"❌ Chat ID test hatası: {e}")
+    
+    logger.info("=== TELEGRAM DEBUG BİTTİ ===")
+
+# Debug'u çalıştır
+debug_telegram_connection()
 
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
     raise ValueError("Ortam değişkenleri (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) ayarlanmalı!")
