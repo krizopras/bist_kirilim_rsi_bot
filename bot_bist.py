@@ -194,7 +194,7 @@ if SCAN_MODE == "CUSTOM" and CUSTOM_TICKERS_STR:
 else:
     TICKERS = ALL_BIST_STOCKS
 
-CHECK_EVERY_MIN = int(os.getenv("CHECK_EVERY_MIN", "15"))
+CHECK_EVERY_MIN = int(os.getenv("CHECK_EVERY_MIN", "30"))
 TIMEFRAMES = [t.strip() for t in os.getenv("TIMEFRAMES", "").split(',') if t.strip()] or ["1h", "4h", "1d"]
 MIN_PRICE = float(os.getenv("MIN_PRICE", "1.0"))
 MIN_VOLUME_TRY = float(os.getenv("MIN_VOLUME_TRY", "1000000"))
@@ -202,7 +202,7 @@ MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "2.0"))
 RSI_LEN = int(os.getenv("RSI_LEN", "22"))
 RSI_EMA_LEN = int(os.getenv("RSI_EMA", "66"))
 PIVOT_PERIOD = int(os.getenv("PIVOT_PERIOD", "10"))
-MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "5.0"))
+MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "2.15"))
 MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
 
 LAST_SCAN_TIME: Optional[dt.datetime] = None
