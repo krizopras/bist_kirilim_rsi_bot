@@ -437,7 +437,7 @@ async def fetch_yfinance_data(symbol: str, timeframe: str) -> Optional[Dict[str,
     try:
         logger.debug(f"Yahoo Finance verisi çekiliyor: {yf_symbol} ({timeframe})")
         ticker = yf.Ticker(yf_symbol)
-        history = ticker.history(period="1y", interval=timeframe)
+        history = ticker.history(period="60d", interval=timeframe)
         
         if history.empty or 'Close' not in history.columns:
             logger.warning(f"Yahoo Finance'dan veri çekilemedi veya eksik veri: {yf_symbol}")
