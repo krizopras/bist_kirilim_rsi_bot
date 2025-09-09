@@ -71,7 +71,7 @@ logging.basicConfig(
 logger = logging.getLogger("cakmaustad_scanner")
 
 # Rate limiting için semaphore
-CONCURRENT_REQUESTS = int(os.getenv("CONCURRENT_REQUESTS", "10"))
+CONCURRENT_REQUESTS = int(os.getenv("CONCURRENT_REQUESTS", "1"))
 request_semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
 
 
@@ -414,7 +414,7 @@ def calculate_confidence_level(signal: SignalInfo, market_conditions: Dict[str, 
 
 # Global rate limiting için
 LAST_TRADINGVIEW_REQUEST = 0
-MIN_TRADINGVIEW_INTERVAL = 3.5  # Minimum 1.5 saniye bekleme
+MIN_TRADINGVIEW_INTERVAL = 10  # Minimum 10 saniye bekleme
 
 def get_tradingview_interval(timeframe: str) -> Interval:
     """TradingView zaman dilimini Interval nesnesine dönüştürür"""
