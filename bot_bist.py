@@ -158,7 +158,36 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__) # __name__ kullanmak en iyi pratiktir
+# TELEGRAM TEST - Geçici debug kodu
+import requests
+print("=== TELEGRAM TEST BAŞLADI ===")
+print(f"Bot Token: {TELEGRAM_BOT_TOKEN[:20]}...")
+print(f"Chat ID: {TELEGRAM_CHAT_ID}")
 
+try:
+    # getMe test
+    response = requests.get(f"{TELEGRAM_API_URL}getMe", timeout=5)
+    print(f"getMe Status: {response.status_code}")
+    if response.status_code == 200:
+        bot_info = response.json()
+        print(f"Bot Username: @{bot_info['result']['username']}")
+        
+        # Test mesajı gönder
+        test_data = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'text': '🔧 Render Test - Bot çalışıyor!'
+        }
+        msg_response = requests.post(f"{TELEGRAM_API_URL}sendMessage", json=test_data, timeout=5)
+        print(f"Message Status: {msg_response.status_code}")
+        if msg_response.status_code != 200:
+            print(f"Message Error: {msg_response.text}")
+    else:
+        print(f"getMe Error: {response.text}")
+        
+except Exception as e:
+    print(f"Test Error: {e}")
+
+print("=== TELEGRAM TEST BİTTİ ===")
 # Rate limiting için semaphore
 CONCURRENT_REQUESTS = int(os.getenv("CONCURRENT_REQUESTS", "10"))
 request_semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
