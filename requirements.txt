@@ -2,10 +2,9 @@ aiohttp
 python-dotenv
 pandas
 numpy
-yfinance
+yfinance==0.2.32
 matplotlib
 pytz
 investpy
 ta
 scipy
-tradingview_ta
