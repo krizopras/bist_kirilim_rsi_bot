@@ -324,7 +324,7 @@ async def fetch_yfinance_data(symbol: str, timeframe: str) -> Optional[Dict[str,
         def fetch_data():
             ticker = yf.Ticker(yf_symbol)
             # Daha fazla veri al (RSI için)
-            period = "6mo" if timeframe == "1d" else "3mo"
+            period = "2y" if timeframe == "1d" else "1y"
             return ticker.history(period=period, interval=yf_interval, timeout=10)
         
         loop = asyncio.get_event_loop()
