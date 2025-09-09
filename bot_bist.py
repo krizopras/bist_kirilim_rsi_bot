@@ -1,116 +1,78 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CakmaUstad RSI Strategy - TradingView Entegrasyonlu (İyileştirilmiş)
+CakmaUstad BIST Scanner
+- TradingView kullan, 429 olursa otomatik bekle ve tekrar dene
+- TradingView başarısız olursa yfinance fallback
+- Telegram'a sinyal gönder
+- Zamanlanmış tarama döngüsü
+
+Gerekli paketler:
+pip install tradingview_ta yfinance aiohttp python-dotenv pandas numpy pytz
+
+Dosyalar:
+- env.txt (aynı klasörde)
 """
 
-import io
 import os
-import asyncio
-import aiohttp
-from aiohttp import web
-import datetime as dt
-import logging
-import json
-import sys
-import locale
-from io import BytesIO
 import time
-from datetime import timezone, timedelta
-from typing import List, Tuple, Dict, Optional, Set, Any
+import asyncio
+import logging
+import random
+import json
 from dataclasses import dataclass, asdict
-from concurrent.futures import ThreadPoolExecutor
-import numpy as np
+from typing import Dict, List, Optional
+
 import pandas as pd
-import math
-import yfinance as yf
+import numpy as np
 import pytz
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
-from dotenv import load_dotenv
-from tradingview_ta import TA_Handler, Interval, Exchange
+import yfinance as yf
+from tradingview_ta import TA_Handler, Interval
+from dotenv import dotenv_values
+import aiohttp
 
-# Karakter kodlama düzeltmesi
-try:
-    locale.setlocale(locale.LC_ALL, 'tr_TR.UTF-8')
-except:
-    try:
-        locale.setlocale(locale.LC_ALL, 'Turkish_Turkey.1254')
-    except:
-        pass
+# ------------------------------------------------------------
+# Konfigürasyon
+# ------------------------------------------------------------
+ENV = dotenv_values("env.txt") if os.path.exists("env.txt") else {}
 
-# Load .env
-load_dotenv()
+def getenv(name: str, default: str = "") -> str:
+    return os.getenv(name, ENV.get(name, default))
 
-# --- AYARLAR VE GÜVENLİK ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
-    raise ValueError("Ortam değişkenleri (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) ayarlanmalı!")
-
-LOG_FILE = os.getenv('LOG_FILE', 'trading_bot.log')
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-HEALTH_CHECK_PORT = int(os.getenv("PORT", 8080))
-IST_TZ = pytz.timezone('Europe/Istanbul')
-
-# 🔥 TEST modu için ayar
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
-
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("cakmaustad_scanner")
 
-# Rate limiting için semaphore
-CONCURRENT_REQUESTS = int(os.getenv("CONCURRENT_REQUESTS", "1"))
-request_semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
+IST_TZ = pytz.timezone("Europe/Istanbul")
 
+TELEGRAM_BOT_TOKEN = getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = getenv("TELEGRAM_CHAT_ID")
 
-# ----------------------- TARAMA AYARLARI -----------------------
-MARKET_OPEN_HOUR = 9
-MARKET_CLOSE_HOUR = 18
-MARKET_CLOSE_MINUTE = 30
-LUNCH_START_HOUR = 12
-LUNCH_START_MINUTE = 30
-LUNCH_END_HOUR = 14
-LUNCH_END_MINUTE = 0
+SCAN_MODE = getenv("SCAN_MODE", "ALL").upper()          # ALL | CUSTOM
+CUSTOM_TICKERS = [s.strip().upper() for s in getenv("CUSTOM_TICKERS", "GARAN,ASELS,THYAO").split(",") if s.strip()]
 
-def is_market_hours() -> bool:
-    """Geliştirilmiş borsa saatleri kontrolü"""
-    if TEST_MODE:
-        logger.debug("TEST_MODE aktif - piyasa hep açık kabul ediliyor")
-        return True
+TIMEFRAMES = [s.strip() for s in getenv("TIMEFRAMES", "1d,4h,1h,15m").split(",") if s.strip()]
 
-    now_ist = dt.datetime.now(IST_TZ)   
+CHECK_EVERY_MIN = int(getenv("CHECK_EVERY_MIN", "15"))
+MIN_PRICE = float(getenv("MIN_PRICE", "1.0"))
+MIN_VOLUME_TRY = float(getenv("MIN_VOLUME_TRY", "1000000"))
+MIN_SIGNAL_SCORE = float(getenv("MIN_SIGNAL_SCORE", "1.15"))
 
-    # Hafta sonu kontrolü
-    if now_ist.weekday() >= 5: 
-        return False
-    
-    current_time = now_ist.time()
-    market_open = dt.time(MARKET_OPEN_HOUR, 0)
-    market_close = dt.time(MARKET_CLOSE_HOUR, MARKET_CLOSE_MINUTE)
-    lunch_start = dt.time(LUNCH_START_HOUR, LUNCH_START_MINUTE)
-    lunch_end = dt.time(LUNCH_END_HOUR, LUNCH_END_MINUTE)
-    
-    # Öğle molası kontrolü
-    if lunch_start <= current_time <= lunch_end:
-        logger.debug("Öğle molası - piyasa kapalı")
-        return False
-        
-    return market_open <= current_time <= market_close
+CONCURRENT_REQUESTS = int(getenv("CONCURRENT_REQUESTS", "1"))
+SEM = asyncio.Semaphore(CONCURRENT_REQUESTS)
 
-# Hisse listesi
-ALL_BIST_STOCKS = [
+# Rate limit ayarları
+MIN_TRADINGVIEW_INTERVAL = 15  # saniye
+_last_tv_ts = 0.0
+MAX_RETRY_ATTEMPTS = 3
+
+# Batch ayarı (tek seferde kontrol edilen sembol adedi)
+BATCH_SIZE = 20
+
+# "ALL" modu için örnek BIST sembolleri (kısa liste; kendi listenle büyütebilirsin)
+DEFAULT_BIST_TICKERS = [
     "ACSEL", "ADEL", "ADESE", "ADGYO", "AFYON", "AGHOL", "AGESA", "AGROT", "AHSGY", "AHGAZ",
     "AKBNK", "AKCNS", "AKYHO", "AKENR", "AKFGY", "AKFIS", "AKFYE", "ATEKS", "AKSGY", "AKMGY",
     "AKSA", "AKSEN", "AKGRT", "AKSUE", "ALCAR", "ALGYO", "ALARK", "ALBRK", "ALKIM", "ALKA",
@@ -187,1253 +149,354 @@ ALL_BIST_STOCKS = [
     "BINHO"
 ]
 
-SCAN_MODE = os.getenv("SCAN_MODE", "ALL")
-CUSTOM_TICKERS_STR = os.getenv("CUSTOM_TICKERS", "")
-if SCAN_MODE == "CUSTOM" and CUSTOM_TICKERS_STR:
-    TICKERS = [t.strip() for t in CUSTOM_TICKERS_STR.split(',')]
-else:
-    TICKERS = ALL_BIST_STOCKS
-
-CHECK_EVERY_MIN = int(os.getenv("CHECK_EVERY_MIN", "30"))
-TIMEFRAMES = [t.strip() for t in os.getenv("TIMEFRAMES", "").split(',') if t.strip()] or ["1h", "4h", "1d"]
-MIN_PRICE = float(os.getenv("MIN_PRICE", "1.0"))
-MIN_VOLUME_TRY = float(os.getenv("MIN_VOLUME_TRY", "1000000"))
-MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "2.0"))
-RSI_LEN = int(os.getenv("RSI_LEN", "22"))
-RSI_EMA_LEN = int(os.getenv("RSI_EMA", "66"))
-PIVOT_PERIOD = int(os.getenv("PIVOT_PERIOD", "10"))
-MIN_SIGNAL_SCORE = float(os.getenv("MIN_SIGNAL_SCORE", "2.15"))
-MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
-
-LAST_SCAN_TIME: Optional[dt.datetime] = None
-START_TIME = time.time()
-DAILY_SIGNALS: Dict[str, Dict] = {}
-FAILED_SYMBOLS: Set[str] = set()
-
+# ------------------------------------------------------------
+# Veri yapıları ve yardımcı fonksiyonlar
+# ------------------------------------------------------------
 @dataclass
 class SignalInfo:
     symbol: str
     timeframe: str
-    direction: str
     price: float
     rsi: float
-    rsi_ema: float
-    volume_ratio: float
-    volume_try: float
-    strength_score: float
+    ema: Optional[float]
+    vol_ratio: float
+    vol_try: float
+    score: float
+    direction: str
     timestamp: str
-    trend_break: Optional[str] = None
-    confidence: float = 0.0
 
-# ----------------------- YARDIMCI FONKSİYONLAR -----------------------
-def cleanup_old_signals():
-    """Eski sinyalleri temizle"""
-    global DAILY_SIGNALS
-    now = dt.datetime.now(IST_TZ)
-    
-    # Gece yarısı sinyalleri temizle
-    if now.hour == 0 and now.minute < CHECK_EVERY_MIN:
-        old_count = len(DAILY_SIGNALS)
-        DAILY_SIGNALS.clear()
-        FAILED_SYMBOLS.clear()
-        logger.info(f"Günlük sinyaller temizlendi. ({old_count} sinyal silindi)")
+def now_istanbul_str() -> str:
+    return pd.Timestamp.now(tz=IST_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
 
-def safe_float_convert(value, default: float = 0.0) -> float:
-    """Güvenli float dönüştürme"""
+def safe_float(x, default: float = 0.0) -> float:
     try:
-        if value is None or value == '' or str(value).lower() in ['nan', 'none']:
-            return default
-        return float(value)
-    except (ValueError, TypeError):
+        return float(x)
+    except Exception:
         return default
 
-def validate_data_integrity(data: Dict[str, Any]) -> bool:
-    """Veri bütünlüğünü kontrol et"""
-    required_fields = ['Close', 'Volume', 'RSI']
-    
-    for field in required_fields:
-        if field not in data or data[field] is None:
-            return False
-            
-        try:
-            float(data[field])
-        except (ValueError, TypeError):
-            return False
-    
+def calc_rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = (-delta).clip(lower=0)
+    roll_up = up.ewm(alpha=1/length, adjust=False).mean()
+    roll_down = down.ewm(alpha=1/length, adjust=False).mean()
+    rs = roll_up / roll_down
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+async def _respect_tv_rate_limit():
+    global _last_tv_ts
+    now = time.time()
+    if now - _last_tv_ts < MIN_TRADINGVIEW_INTERVAL:
+        await asyncio.sleep(MIN_TRADINGVIEW_INTERVAL - (now - _last_tv_ts))
+    _last_tv_ts = time.time()
+
+def _tv_interval_map(tf: str) -> str:
+    return {
+        "1d": Interval.INTERVAL_1_DAY,
+        "4h": Interval.INTERVAL_4_HOURS,
+        "1h": Interval.INTERVAL_1_HOUR,
+        "15m": Interval.INTERVAL_15_MINUTES
+    }.get(tf, Interval.INTERVAL_1_DAY)
+
+# ------------------------------------------------------------
+# TradingView'den tek sembol veri çek
+# ------------------------------------------------------------
+async def fetch_tradingview(symbol: str, timeframe: str) -> Optional[Dict]:
+    formats = [f"BIST:{symbol}", f"{symbol}.IS", symbol]
+    async with SEM:
+        await _respect_tv_rate_limit()
+        for fmt in formats:
+            try:
+                handler = TA_Handler(
+                    symbol=fmt,
+                    screener="turkey",
+                    exchange="BIST",   # bazı formatlarda önemsiz, ama bırakıyoruz
+                    interval=_tv_interval_map(timeframe),
+                    timeout=20
+                )
+                a = handler.get_analysis()
+                if not a or not a.indicators:
+                    continue
+
+                close = safe_float(a.indicators.get("close"))
+                if not close:
+                    continue
+
+                # TV indikatörleri: varsa al, yoksa None bırak
+                rsi = a.indicators.get("RSI")
+                ema = a.indicators.get("EMA66") or a.indicators.get("EMA50") or None
+                vol = a.indicators.get("volume")
+
+                return {
+                    "Close": safe_float(close),
+                    "RSI": safe_float(rsi) if rsi is not None else None,
+                    "EMA": safe_float(ema) if ema is not None else None,
+                    "Volume": safe_float(vol) if vol is not None else None
+                }
+            except Exception as e:
+                msg = str(e).lower()
+                if "429" in msg or "too many requests" in msg:
+                    logger.warning(f"TradingView 429: {symbol} için 30sn bekleniyor...")
+                    await asyncio.sleep(30)
+                else:
+                    logger.debug(f"TV format çalışmadı ({fmt}): {e}")
+        return None
+
+# ------------------------------------------------------------
+# yfinance fallback
+# ------------------------------------------------------------
+def _yf_period_interval(tf: str):
+    # yfinance 4h interval'ı bazı durumlarda sınırlı döner; mümkün olanı kullanıyoruz
+    period = {"1d": "6mo", "4h": "60d", "1h": "30d", "15m": "5d"}.get(tf, "3mo")
+    interval = {"1d": "1d", "4h": "1h", "1h": "1h", "15m": "15m"}.get(tf, "1d")
+    return period, interval
+
+async def fetch_yfinance(symbol: str, timeframe: str) -> Optional[Dict]:
+    try:
+        yf_symbol = f"{symbol}.IS"
+        period, interval = _yf_period_interval(timeframe)
+        df = yf.download(yf_symbol, period=period, interval=interval, progress=False)
+        if df is None or df.empty:
+            return None
+        close = df["Close"]
+        last = df.iloc[-1]
+        rsi_series = calc_rsi(close, 14)
+        ema_series = close.ewm(span=66, adjust=False).mean()
+
+        return {
+            "Close": safe_float(last["Close"]),
+            "RSI": safe_float(rsi_series.iloc[-1]),
+            "EMA": safe_float(ema_series.iloc[-1]),
+            "Volume": safe_float(last.get("Volume", np.nan))
+        }
+    except Exception as e:
+        logger.error(f"yfinance hata ({symbol}, {timeframe}): {e}")
+        return None
+
+# ------------------------------------------------------------
+# Akıllı çekme: önce TV, sonra fallback yfinance
+# ------------------------------------------------------------
+async def fetch_market_data(symbol: str, timeframe: str) -> Optional[Dict]:
+    # Birkaç deneme: TV -> yfinance -> bekle & tekrar
+    for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
+        data = await fetch_tradingview(symbol, timeframe)
+        if data:
+            return data
+
+        logger.warning(f"TV başarısız ({symbol}, {timeframe}), yfinance fallback denemesi (try={attempt})...")
+        yfd = await fetch_yfinance(symbol, timeframe)
+        if yfd:
+            return yfd
+
+        await asyncio.sleep(5 * attempt)  # artan bekleme
+    return None
+# ------------------------------------------------------------
+# Sinyal skoru ve filtreler
+# ------------------------------------------------------------
+def compute_score(price: float, rsi: Optional[float], ema: Optional[float],
+                  volume: Optional[float]) -> Dict[str, float]:
+    """
+    Basit bir skor:
+    - RSI 30 altı => güçlü pozitif, 70 üstü => negatif
+    - Fiyat EMA66 üstü => +, altı => -
+    - Hacim katsayısı (normalize yoksa 1.0)
+    """
+    score = 1.0
+    direction = "NEUTRAL"
+    vol_ratio = 1.0
+
+    if volume is not None and volume > 0:
+        # çok kaba normalize: log ölçeği
+        vol_ratio = max(0.5, min(2.0, np.log10(volume + 10) / 6))
+
+    if rsi is not None:
+        if rsi < 30:
+            score *= 1.25
+            direction = "BULLISH"
+        elif rsi > 70:
+            score *= 0.85
+            direction = "BEARISH"
+        else:
+            score *= 1.0
+            direction = "NEUTRAL"
+
+    if ema is not None and price is not None:
+        if price > ema:
+            score *= 1.10
+            if direction == "NEUTRAL":
+                direction = "BULLISH"
+        elif price < ema:
+            score *= 0.92
+            if direction == "NEUTRAL":
+                direction = "BEARISH"
+
+    score *= vol_ratio
+    return {"score": float(score), "direction": direction, "vol_ratio": float(vol_ratio)}
+
+def passes_filters(price: float, vol_try: float) -> bool:
+    if price is None or price < MIN_PRICE:
+        return False
+    if vol_try < MIN_VOLUME_TRY:
+        return False
     return True
 
-# ----------------------- CAKMAUSTAD RSI STRATEJİ FONKSİYONLARI -----------------------
-def rma(series: pd.Series, length: int) -> pd.Series:
-    """Running Moving Average (RMA) hesapla"""
-    alpha = 1.0 / length
-    return series.ewm(alpha=alpha, adjust=False).mean()
-
-def rsi_pine(close: pd.Series, length: int = 14) -> pd.Series:
-    """Pine Script benzeri RSI hesaplama"""
-    if len(close) < length:
-        return pd.Series([50.0] * len(close), index=close.index)
-    
-    delta = close.diff()
-    up = delta.where(delta > 0, 0.0)
-    down = (-delta).where(delta < 0, 0.0)
-    up_rma = rma(up, length)
-    down_rma = rma(down, length)
-    rs = up_rma / down_rma.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
-
-def ema(series: pd.Series, length: int) -> pd.Series:
-    """Exponential Moving Average"""
-    return series.ewm(span=length, adjust=False).mean()
-
-def detect_trend_breakouts(rsi_series: pd.Series, pivot_period: int = 10) -> Dict[str, bool]:
-    """Geliştirilmiş trend kırılım tespiti"""
-    if len(rsi_series) < pivot_period * 2:
-        return {'bull_break': False, 'bear_break': False}
-    
-    bull_break = False
-    bear_break = False
-    
-    # Son değerleri analiz et
-    recent_rsi = rsi_series.tail(20)
-    current_rsi = recent_rsi.iloc[-1]
-    
-    if len(recent_rsi) >= 10:
-        # Trend analizi
-        first_half_max = recent_rsi.iloc[:10].max()
-        second_half_max = recent_rsi.iloc[10:].max()
-        first_half_min = recent_rsi.iloc[:10].min()
-        second_half_min = recent_rsi.iloc[10:].min()
-        
-        # Bullish breakout: Düşen trendden çıkış
-        if (first_half_max > second_half_max and 
-            current_rsi > second_half_max and 
-            current_rsi > recent_rsi.iloc[-2]):
-            bull_break = True
-        
-        # Bearish breakout: Yükselen trendden çıkış
-        if (first_half_min < second_half_min and 
-            current_rsi < second_half_min and 
-            current_rsi < recent_rsi.iloc[-2]):
-            bear_break = True
-    
-    return {'bull_break': bull_break, 'bear_break': bear_break}
-
-def calculate_signal_strength(signal: SignalInfo) -> float:
-    """Geliştirilmiş sinyal gücü hesaplama"""
-    score = 0.0
-    
-    # RSI seviyesi skorlaması
-    if signal.direction == "BULLISH":
-        if signal.rsi <= 25:
-            score += 5.0
-        elif signal.rsi <= 30:
-            score += 4.0
-        elif signal.rsi <= 35:
-            score += 3.0
-        elif signal.rsi <= 40:
-            score += 2.0
-        elif signal.rsi <= 45:
-            score += 1.0
-    else:  # BEARISH
-        if signal.rsi >= 75:
-            score += 5.0
-        elif signal.rsi >= 70:
-            score += 4.0
-        elif signal.rsi >= 65:
-            score += 3.0
-        elif signal.rsi >= 60:
-            score += 2.0
-        elif signal.rsi >= 55:
-            score += 1.0
-    
-    # RSI-EMA ilişki skorlaması
-    rsi_ema_diff = abs(signal.rsi - signal.rsi_ema)
-    if signal.direction == "BULLISH" and signal.rsi > signal.rsi_ema:
-        score += min(3.0, rsi_ema_diff / 10.0)
-    elif signal.direction == "BEARISH" and signal.rsi < signal.rsi_ema:
-        score += min(3.0, rsi_ema_diff / 10.0)
-    
-    # Trend kırılımı bonus
-    if signal.trend_break:
-        score += 2.5
-    
-    # Hacim gücü skorlaması
-    if signal.volume_ratio >= 4.0:
-        score += 2.5
-    elif signal.volume_ratio >= 3.0:
-        score += 2.0
-    elif signal.volume_ratio >= 2.0:
-        score += 1.5
-    elif signal.volume_ratio >= 1.5:
-        score += 1.0
-    
-    # Zaman dilimi ağırlığı
-    timeframe_weights = {'15m': 0.5, '1h': 1.0, '4h': 2.0, '1d': 3.0}
-    score += timeframe_weights.get(signal.timeframe, 1.0)
-    
-    # Fiyat seviyesi kontrolü (çok düşük fiyatlı hisseler için)
-    if signal.price < 5.0:
-        score *= 0.8  # Penaltı
-    elif signal.price > 100.0:
-        score *= 1.1  # Bonus
-    
-    return min(10.0, max(0.0, score))
-
-def calculate_confidence_level(signal: SignalInfo, market_conditions: Dict[str, Any] = None) -> float:
-    """Sinyal güven seviyesi hesaplama"""
-    confidence = 0.0
-    
-    # Temel güven skorlaması
-    if signal.strength_score >= 8.0:
-        confidence += 0.4
-    elif signal.strength_score >= 6.0:
-        confidence += 0.3
-    elif signal.strength_score >= 4.0:
-        confidence += 0.2
-    else:
-        confidence += 0.1
-    
-    # RSI ekstrem seviyelerde daha yüksek güven
-    if signal.direction == "BULLISH" and signal.rsi <= 30:
-        confidence += 0.3
-    elif signal.direction == "BEARISH" and signal.rsi >= 70:
-        confidence += 0.3
-    
-    # Zaman dilimi güveni
-    if signal.timeframe in ['4h', '1d']:
-        confidence += 0.2
-    
-    # Hacim onayı
-    if signal.volume_ratio >= 2.0:
-        confidence += 0.1
-    
-    return min(1.0, confidence)
-
-# ----------------------- TRADINGVIEW VERİ ÇEKME FONKSİYONLARI -----------------------
-
-# Global rate limiting için
-LAST_TRADINGVIEW_REQUEST = 0
-MIN_TRADINGVIEW_INTERVAL = 10  # Minimum 10 saniye bekleme
-
-def get_tradingview_interval(timeframe: str) -> Interval:
-    """TradingView zaman dilimini Interval nesnesine dönüştürür"""
-    interval_map = {
-        "1m": Interval.INTERVAL_1_MINUTE,
-        "5m": Interval.INTERVAL_5_MINUTES,
-        "15m": Interval.INTERVAL_15_MINUTES,
-        "30m": Interval.INTERVAL_30_MINUTES,
-        "1h": Interval.INTERVAL_1_HOUR,
-        "2h": Interval.INTERVAL_2_HOURS,
-        "4h": Interval.INTERVAL_4_HOURS,
-        "1d": Interval.INTERVAL_1_DAY,
-        "1W": Interval.INTERVAL_1_WEEK,
-        "1M": Interval.INTERVAL_1_MONTH
-    }
-    return interval_map.get(timeframe, Interval.INTERVAL_1_HOUR)
-
-async def tradingview_rate_limit():
-    """TradingView için global rate limiting"""
-    global LAST_TRADINGVIEW_REQUEST
-    current_time = time.time()
-    time_since_last = current_time - LAST_TRADINGVIEW_REQUEST
-    
-    if time_since_last < MIN_TRADINGVIEW_INTERVAL:
-        wait_time = MIN_TRADINGVIEW_INTERVAL - time_since_last
-        await asyncio.sleep(wait_time)
-    
-    LAST_TRADINGVIEW_REQUEST = time.time()
-
-async def fetch_tradingview_data_with_retry(symbol: str, timeframe: str, max_retries: int = MAX_RETRY_ATTEMPTS) -> Optional[Dict[str, Any]]:
-    """Retry mekanizmalı TradingView veri çekme"""
-    
-    # Başarısız sembolleri tekrar deneme sıklığını azalt
-    symbol_key = f"{symbol}_{timeframe}"
-    if symbol_key in FAILED_SYMBOLS:
-        # Her 10 taramada bir başarısız sembolleri tekrar dene
-        import random
-        if random.randint(1, 10) != 1:
-            return None
-    
-    for attempt in range(max_retries):
-        try:
-            result = await fetch_tradingview_data(symbol, timeframe)
-            if result and validate_data_integrity_enhanced(result, symbol):
-                # Başarılı olursa FAILED_SYMBOLS'dan kaldır
-                FAILED_SYMBOLS.discard(symbol_key)
-                return result
-            else:
-                logger.debug(f"Veri doğrulama başarısız - {symbol} (Deneme {attempt + 1})")
-                
-        except Exception as e:
-            error_msg = str(e)
-            
-            # Hata türüne göre özel işlem
-            if "Too many requests" in error_msg or "rate limit" in error_msg.lower():
-                logger.warning(f"Rate limit aşıldı - {symbol}, uzun bekleme")
-                await asyncio.sleep(10)  # Rate limit için uzun bekleme
-            elif "Symbol not found" in error_msg:
-                logger.warning(f"Sembol bulunamadı: {symbol}, kalıcı olarak başarısız işaretleniyor")
-                FAILED_SYMBOLS.add(symbol_key)
-                return None
-            else:
-                logger.warning(f"TradingView veri çekme denemesi {attempt + 1}/{max_retries} başarısız - {symbol}: {error_msg}")
-            
-            if attempt < max_retries - 1:
-                wait_time = min(30, (2 ** attempt) * 1.5)  # Max 30 saniye bekleme
-                await asyncio.sleep(wait_time)
-    
-    FAILED_SYMBOLS.add(symbol_key)
-    logger.error(f"TradingView'dan {symbol} için {max_retries} denemede veri çekilemedi")
-    return None
-
-async def fetch_tradingview_data(symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-    """Rate limiting ile TradingView'dan hisse senedi verisi çeker"""
-    async with request_semaphore:
-        try:
-            # Global rate limiting uygula
-            await tradingview_rate_limit()
-            
-            interval = get_tradingview_interval(timeframe)
-            
-            # Farklı sembol formatlarını dene
-            symbol_formats = [
-                f"BIST:{symbol}",     # Exchange prefix format
-                f"{symbol}.IS",       # Standard suffix  
-                f"{symbol}",          # Sadece sembol
-                f"BORSA:{symbol}"     # Alternatif exchange prefix
-            ]
-            
-            last_error = None
-            
-            for tv_symbol in symbol_formats:
-                try:
-                    logger.debug(f"TradingView format denemesi: {tv_symbol}")
-                    
-                    handler = TA_Handler(
-                        symbol=tv_symbol,
-                        exchange="BIST",
-                        screener="turkey",
-                        interval=interval,
-                        timeout=45
-                    )
-                    
-                    analysis = handler.get_analysis()
-                    
-                    if analysis and analysis.indicators and analysis.indicators.get('close'):
-                        # Bu format çalıştı, veriyi işle
-                        indicators = analysis.indicators
-                        
-                        close_price = indicators.get('close')
-                        volume = indicators.get('volume')
-                        rsi = indicators.get('RSI')
-                        
-                        # Kritik verilerin varlığını kontrol et
-                        if not close_price or close_price <= 0:
-                            logger.debug(f"Format {tv_symbol} geçersiz fiyat verdi: {close_price}")
-                            continue  # Bu format veri vermiyor, diğerini dene
-                            
-                        if not volume or volume < 0:
-                            volume = close_price * 50000  # Tahmini günlük hacim
-                        
-                        if not rsi or rsi < 0 or rsi > 100:
-                            rsi = 50.0  # Nötr RSI değeri
-                        
-                        # EMA değerlerini al (çoklu kaynak deneme)
-                        ema_candidates = [
-                            indicators.get(f'EMA{RSI_EMA_LEN}'),
-                            indicators.get('EMA50'),
-                            indicators.get('EMA21'), 
-                            indicators.get('EMA20'),
-                            indicators.get('EMA10'),
-                            indicators.get('SMA20'),
-                            indicators.get('SMA10')
-                        ]
-                        
-                        ema_value = close_price  # Varsayılan
-                        for candidate in ema_candidates:
-                            if candidate and candidate > 0:
-                                ema_value = candidate
-                                break
-                        
-                        # OHLC verilerini güvenli şekilde al
-                        open_price = indicators.get('open') or close_price
-                        high_price = indicators.get('high') or close_price
-                        low_price = indicators.get('low') or close_price
-                        
-                        # OHLC mantık kontrolü
-                        if high_price < close_price:
-                            high_price = close_price
-                        if low_price > close_price:
-                            low_price = close_price
-                        if open_price <= 0:
-                            open_price = close_price
-                        
-                        result = {
-                            'Open': safe_float_convert(open_price, close_price),
-                            'High': safe_float_convert(high_price, close_price),
-                            'Low': safe_float_convert(low_price, close_price),
-                            'Close': safe_float_convert(close_price),
-                            'Volume': safe_float_convert(volume),
-                            'RSI': safe_float_convert(rsi, 50.0),
-                            'EMA': safe_float_convert(ema_value, close_price),
-                            'MACD.macd': safe_float_convert(indicators.get('MACD.macd')),
-                            'MACD.signal': safe_float_convert(indicators.get('MACD.signal')),
-                            'ADX': safe_float_convert(indicators.get('ADX'), 25.0),
-                            'CCI': safe_float_convert(indicators.get('CCI')),
-                            'BB.upper': safe_float_convert(indicators.get('BB.upper'), close_price * 1.02),
-                            'BB.lower': safe_float_convert(indicators.get('BB.lower'), close_price * 0.98),
-                            'BB.middle': safe_float_convert(indicators.get('BB.middle'), close_price),
-                            'summary': analysis.summary.get('RECOMMENDATION', 'NEUTRAL') if analysis.summary else 'NEUTRAL',
-                            'oscillators': analysis.oscillators.get('RECOMMENDATION', 'NEUTRAL') if analysis.oscillators else 'NEUTRAL',
-                            'moving_averages': analysis.moving_averages.get('RECOMMENDATION', 'NEUTRAL') if analysis.moving_averages else 'NEUTRAL'
-                        }
-                        
-                        logger.debug(f"Başarılı format: {symbol} -> {tv_symbol} (Fiyat: {close_price:.3f})")
-                        return result
-                
-                except Exception as e:
-                    last_error = str(e)
-                    if any(x in str(e).lower() for x in ["symbol not found", "exchange", "invalid symbol"]):
-                        logger.debug(f"Format {tv_symbol} çalışmadı: {e}")
-                        continue  # Bu format çalışmadı, diğerini dene
-                    else:
-                        # Farklı bir hata türü
-                        logger.warning(f"Format {tv_symbol} farklı hata verdi: {e}")
-                        break
-            
-            # Hiçbir format çalışmadı
-            logger.error(f"TradingView'da {symbol} için hiçbir format çalışmadı. Son hata: {last_error}")
-            return None
-            
-        except Exception as e:
-            error_msg = str(e)
-            
-            # Spesifik hata türleri için özel loglama
-            if "Too many requests" in error_msg:
-                logger.error(f"TradingView rate limit aşıldı - {symbol}")
-            elif "timeout" in error_msg.lower():
-                logger.error(f"TradingView timeout - {symbol}")
-            elif "Connection" in error_msg or "Network" in error_msg:
-                logger.error(f"TradingView bağlantı hatası - {symbol}")
-            else:
-                logger.error(f"TradingView genel hata {symbol} - {timeframe}: {error_msg}")
-            
-            return None
-def validate_data_integrity_enhanced(data: Dict[str, Any], symbol: str) -> bool:
-    """Geliştirilmiş veri bütünlüğü kontrolü"""
-    try:
-        required_fields = ['Close', 'Volume', 'RSI']
-        
-        for field in required_fields:
-            if field not in data or data[field] is None:
-                logger.debug(f"Eksik alan {symbol}: {field}")
-                return False
-                
-            try:
-                value = float(data[field])
-                
-                # Alan-spesifik doğrulamalar
-                if field == 'Close':
-                    if value <= 0 or value > 20000:  # BIST için makul fiyat aralığı
-                        logger.debug(f"Mantıksız fiyat {symbol}: {value}")
-                        return False
-                elif field == 'Volume':
-                    if value < 0:  # Negatif hacim kabul edilmez
-                        logger.debug(f"Negatif hacim {symbol}: {value}")
-                        return False
-                elif field == 'RSI':
-                    if value < 0 or value > 100:  # RSI 0-100 arası olmalı
-                        logger.debug(f"RSI aralık dışı {symbol}: {value}")
-                        return False
-                        
-            except (ValueError, TypeError):
-                logger.debug(f"Sayıya dönüştürülemeyen değer {symbol} - {field}: {data[field]}")
-                return False
-        
-        # Ek mantık kontrolleri
-        try:
-            high = float(data.get('High', data['Close']))
-            low = float(data.get('Low', data['Close']))
-            close = float(data['Close'])
-            
-            # OHLC mantık kontrolü
-            if high < close or low > close:
-                logger.debug(f"OHLC mantık hatası {symbol}: H={high}, L={low}, C={close}")
-                return False
-                
-        except:
-            pass  # OHLC kontrolü opsiyonel
-        
-        return True
-        
-    except Exception as e:
-        logger.warning(f"Veri doğrulama hatası {symbol}: {e}")
-        return False
-
-def calculate_volume_metrics(current_volume: float, symbol: str) -> Tuple[float, float]:
-    """Hacim metriklerini hesapla"""
-    # Sembol bazında ortalama hacim tahminleri (geliştirilebilir)
-    symbol_volume_multipliers = {
-        'AKBNK': 0.6, 'GARAN': 0.6, 'ISCTR': 0.7, 'THYAO': 0.8, 'ASELS': 0.7,
-        'SISE': 0.8, 'KOZAL': 0.9, 'KCHOL': 0.7, 'ARCLK': 0.8, 'TUPRS': 0.8
-    }
-    
-    # Sembol-spesifik çarpan veya varsayılan değer
-    multiplier = symbol_volume_multipliers.get(symbol, 0.7)
-    
-    # Ortalama hacim tahmini
-    estimated_avg_volume = current_volume * multiplier
-    volume_ratio = current_volume / max(estimated_avg_volume, 1.0)
-    
-    return volume_ratio, estimated_avg_volume
-
-async def test_tradingview_connectivity():
-    """TradingView bağlantısını test et"""
-    test_symbols = ["AKBNK", "GARAN", "ISCTR"]
-    
-    logger.info("TradingView bağlantısı test ediliyor...")
-    
-    for symbol in test_symbols:
-        try:
-            data = await fetch_tradingview_data(symbol, "1d")
-            if data and data.get('Close'):
-                logger.info(f"TradingView test başarılı: {symbol} = {data['Close']:.3f} TL")
-                return True
-        except Exception as e:
-            logger.warning(f"TradingView test hatası {symbol}: {e}")
-    
-    logger.error("TradingView bağlantı testi başarısız!")
-    return False
-# ----------------------- ANA ANALİZ FONKSİYONU -----------------------
-async def fetch_and_analyze_data(session: aiohttp.ClientSession, symbol: str, timeframe: str) -> Tuple[Optional["SignalInfo"], Optional[pd.DataFrame], Optional[Dict[str, Any]]]:
-    """Geliştirilmiş hisse senedi analizi"""
-    try:
-        # Başarısız sembolları atla
-        symbol_key = f"{symbol}_{timeframe}"
-        if symbol_key in FAILED_SYMBOLS:
-            return None, None, None
-
-        # TradingView'dan veriyi çek
-        data = await fetch_tradingview_data_with_retry(symbol, timeframe)
-        if not data:
-            return None, None, None
-
-        # DataFrame oluştur
-        df = pd.DataFrame([{
-            'Open': data['Open'],
-            'High': data['High'],
-            'Low': data['Low'],
-            'Close': data['Close'],
-            'Volume': data['Volume']
-        }])
-
-        # Temel filtreler
-        last_close = data['Close']
-        last_volume = data['Volume']
-        
-        # Minimum fiyat ve hacim kontrolü
-        if last_close < MIN_PRICE:
-            logger.debug(f"{symbol} minimum fiyatın altında: {last_close}")
-            return None, df, None
-            
-        volume_try = last_close * last_volume
-        if volume_try < MIN_VOLUME_TRY:
-            logger.debug(f"{symbol} minimum hacim altında: {volume_try:,.0f} TL")
-            return None, df, None
-
-        # RSI ve diğer indikatörleri al
-        rsi_value = data['RSI']
-        ema_value = data['EMA']
-        
-        # Hacim metriklerini hesapla
-        volume_ratio, avg_volume = calculate_volume_metrics(last_volume, symbol)
-        
-        if volume_ratio < MIN_VOLUME_RATIO:
-            logger.debug(f"{symbol} hacim oranı düşük: {volume_ratio:.2f}")
-            return None, df, None
-
-        # Sinyal yönünü belirle (geliştirilmiş mantık)
-        direction = None
-        trend_strength = 0.0
-        
-        # TradingView öneri sistemini de dahil et
-        tv_recommendation = data.get('summary', 'NEUTRAL')
-        oscillator_rec = data.get('oscillators', 'NEUTRAL')
-        
-        # Bullish sinyaller
-        if (rsi_value < 45 and 
-            last_close > ema_value and
-            volume_ratio >= MIN_VOLUME_RATIO):
-            
-            # Güçlü bullish koşulları
-            if (rsi_value < 30 or 
-                tv_recommendation in ['STRONG_BUY', 'BUY'] or
-                oscillator_rec in ['STRONG_BUY', 'BUY']):
-                direction = "BULLISH"
-                trend_strength = min(1.0, (45 - rsi_value) / 15.0)
-        
-        # Bearish sinyaller
-        elif (rsi_value > 55 and 
-              last_close < ema_value and
-              volume_ratio >= MIN_VOLUME_RATIO):
-            
-            # Güçlü bearish koşulları
-            if (rsi_value > 70 or 
-                tv_recommendation in ['STRONG_SELL', 'SELL'] or
-                oscillator_rec in ['STRONG_SELL', 'SELL']):
-                direction = "BEARISH"
-                trend_strength = min(1.0, (rsi_value - 55) / 15.0)
-
-        if direction is None:
-            return None, df, None
-
-        # Trend kırılımını tespit et (basitleştirilmiş)
-        trend_break = None
-        if direction == "BULLISH":
-            if rsi_value > 30 and rsi_value < 45 and volume_ratio > 2.0:
-                trend_break = "BULLISH_TREND_BREAK"
-        elif direction == "BEARISH":
-            if rsi_value < 70 and rsi_value > 55 and volume_ratio > 2.0:
-                trend_break = "BEARISH_TREND_BREAK"
-
-        # Sinyal nesnesini oluştur
-        signal = SignalInfo(
-            symbol=symbol,
-            timeframe=timeframe,
-            direction=direction,
-            price=last_close,
-            rsi=rsi_value,
-            rsi_ema=ema_value,
-            volume_ratio=volume_ratio,
-            volume_try=volume_try,
-            strength_score=0.0,
-            timestamp=dt.datetime.now(IST_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-            trend_break=trend_break,
-            confidence=0.0
-        )
-
-        # Güç skorunu ve güven seviyesini hesapla
-        signal.strength_score = calculate_signal_strength(signal)
-        signal.confidence = calculate_confidence_level(signal)
-        
-        # Minimum skor kontrolü
-        if signal.strength_score < MIN_SIGNAL_SCORE:
-            logger.debug(f"{symbol} sinyal gücü yetersiz: {signal.strength_score:.1f}")
-            return None, df, None
-
-        # İndikatör verilerini hazırla
-        indicators = {
-            'rsi': pd.Series([rsi_value]),
-            'rsi_ema': pd.Series([ema_value]),
-            'volume_ratio': volume_ratio,
-            'trend_strength': trend_strength,
-            'tv_recommendation': tv_recommendation
-        }
-
-        logger.info(f"🔍 Analiz tamamlandı - {symbol} ({timeframe}): RSI={rsi_value:.1f}, Güç={signal.strength_score:.1f}, Güven={signal.confidence:.2f}")
-        return signal, df, indicators
-    
-    except Exception as e:
-        logger.error(f"{symbol} analiz hatası: {e}")
-        FAILED_SYMBOLS.add(f"{symbol}_{timeframe}")
-        return None, None, None
-
-# ----------------------- TELEGRAM FONKSİYONLARI -----------------------
-async def send_telegram_with_retry(text: str, max_retries: int = 3):
-    """Retry mekanizmalı Telegram mesajı gönder"""
-    for attempt in range(max_retries):
-        try:
-            await send_telegram(text)
-            return True
-        except Exception as e:
-            logger.warning(f"Telegram gönderme denemesi {attempt + 1}/{max_retries}: {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2 * (attempt + 1))
-    
-    logger.error(f"Telegram mesajı {max_retries} denemede gönderilemedi")
-    return False
-
+# ------------------------------------------------------------
+# Telegram
+# ------------------------------------------------------------
 async def send_telegram(text: str):
-    """Telegram mesajı gönder"""
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID, 
-        "text": text, 
-        "parse_mode": "HTML", 
-        "disable_web_page_preview": True
-    }
-    
-    try:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.warning(f"Telegram API hatası: {response.status} - {error_text}")
-                    raise Exception(f"HTTP {response.status}")
-                else:
-                    logger.debug("Telegram mesajı başarıyla gönderildi")
-    except asyncio.TimeoutError:
-        logger.error("Telegram API timeout")
-        raise
-    except Exception as e:
-        logger.error(f"Telegram gönderme hatası: {e}")
-        raise
-
-async def send_chart_to_telegram(token: str, chat_id: str, title: str, df: pd.DataFrame, ind: Dict[str, Any]):
-    """Geliştirilmiş grafik gönderme"""
-    try:
-        matplotlib.use("Agg")
-        plt.style.use('dark_background')
-        
-        fig, (ax_price, ax_rsi, ax_volume) = plt.subplots(3, 1, figsize=(14, 10), 
-                                                         gridspec_kw={'height_ratios': [3, 2, 1]})
-        
-        # Zaman serisi için x ekseni (tek nokta olduğu için basit)
-        xs = [0]
-        
-        # Fiyat grafiği
-        closes = [df['Close'].iloc[0]]
-        highs = [df['High'].iloc[0]]
-        lows = [df['Low'].iloc[0]]
-        
-        ax_price.plot(xs, closes, 'o-', color='cyan', linewidth=3, markersize=8, label='Kapanış')
-        ax_price.plot(xs, highs, '^', color='lime', markersize=6, label='Yüksek')
-        ax_price.plot(xs, lows, 'v', color='red', markersize=6, label='Düşük')
-        
-        ax_price.set_title(f"{title} - Fiyat Analizi", fontsize=16, fontweight='bold', color='white')
-        ax_price.grid(True, alpha=0.3)
-        ax_price.legend(loc='upper left')
-        ax_price.set_ylabel('Fiyat (TL)', color='white')
-        
-        # RSI grafiği
-        if 'rsi' in ind and 'rsi_ema' in ind:
-            rsi_vals = [ind['rsi'].iloc[0]]
-            rsi_ema_vals = [ind['rsi_ema'].iloc[0]]
-            
-            ax_rsi.plot(xs, rsi_vals, 'o-', color='orange', linewidth=3, markersize=8, label=f'RSI ({rsi_vals[0]:.1f})')
-            ax_rsi.axhline(70, color='red', linestyle='--', alpha=0.8, label='Aşırı Alım (70)')
-            ax_rsi.axhline(30, color='lime', linestyle='--', alpha=0.8, label='Aşırı Satım (30)')
-            ax_rsi.axhline(50, color='gray', linestyle='-', alpha=0.5, label='Orta Hat')
-            
-            # RSI seviye renklemesi
-            rsi_color = 'red' if rsi_vals[0] > 70 else 'lime' if rsi_vals[0] < 30 else 'orange'
-            ax_rsi.fill_between(xs, [0], rsi_vals, alpha=0.3, color=rsi_color)
-            
-            ax_rsi.set_ylim(0, 100)
-            ax_rsi.set_ylabel('RSI', color='white')
-            ax_rsi.grid(True, alpha=0.3)
-            ax_rsi.legend(loc='upper left')
-        
-        # Hacim grafiği
-        volumes = [df['Volume'].iloc[0]]
-        volume_ratio = ind.get('volume_ratio', 1.0)
-        
-        volume_color = 'lime' if volume_ratio > 2.0 else 'orange' if volume_ratio > 1.5 else 'red'
-        ax_volume.bar(xs, volumes, color=volume_color, alpha=0.7, 
-                     label=f'Hacim Oranı: {volume_ratio:.1f}x')
-        
-        ax_volume.set_ylabel('Hacim', color='white')
-        ax_volume.legend(loc='upper left')
-        ax_volume.grid(True, alpha=0.3)
-        
-        # Genel görünüm ayarları
-        plt.tight_layout()
-        
-        # Grafik kaydet ve gönder
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', 
-                   facecolor='black', edgecolor='none')
-        plt.close(fig)
-        buf.seek(0)
-
-        url = f"https://api.telegram.org/bot{token}/sendPhoto"
-        timeout = aiohttp.ClientTimeout(total=30)
-        
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            form = aiohttp.FormData()
-            form.add_field('chat_id', chat_id)
-            form.add_field('photo', buf, filename=f'{title}_chart.png', content_type='image/png')
-            
-            async with session.post(url, data=form) as response:
-                if response.status != 200:
-                    logger.error(f"Grafik gönderme hatası: {response.status}")
-
-    except Exception as e:
-        logger.error(f"Grafik oluşturma/gönderme hatası: {e}")
-
-async def send_signal_with_chart(sig: SignalInfo, df: pd.DataFrame, ind: Dict[str, Any]):
-    """Geliştirilmiş sinyal mesajı"""
-    try:
-        # Emoji seçimi
-        direction_emoji = "🚀" if sig.direction == "BULLISH" else "📉"
-        strength_emoji = "💪" if sig.strength_score >= 8 else "👍" if sig.strength_score >= 6 else "👌"
-        confidence_emoji = "🔥" if sig.confidence >= 0.8 else "⭐" if sig.confidence >= 0.6 else "✨"
-        
-        # Ana mesaj
-        message = f"<b>{direction_emoji} CAKMAUSTAD SİNYALİ - {sig.timeframe}</b>\n\n"
-        message += f"<b>📊 {sig.symbol}.IS</b>\n"
-        message += f"<b>🎯 Yön:</b> {sig.direction}\n"
-        message += f"<b>{strength_emoji} Güç:</b> {sig.strength_score:.1f}/10.0\n"
-        message += f"<b>{confidence_emoji} Güven:</b> {sig.confidence*100:.0f}%\n"
-        message += f"<b>💰 Fiyat:</b> {sig.price:.3f} TL\n"
-        message += f"<b>📈 RSI:</b> {sig.rsi:.1f}\n"
-        message += f"<b>📊 EMA:</b> {sig.rsi_ema:.2f}\n"
-        message += f"<b>🔊 Hacim:</b> {sig.volume_try / 1_000_000:.2f}M TL ({sig.volume_ratio:.1f}x)\n"
-        
-        if sig.trend_break:
-            message += f"<b>⚡ Trend Kırılımı:</b> {sig.trend_break}\n"
-        
-        # TradingView önerisi varsa ekle
-        if 'tv_recommendation' in ind:
-            tv_rec = ind['tv_recommendation']
-            message += f"<b>📺 TradingView:</b> {tv_rec}\n"
-        
-        message += f"\n<b>🕐 Zaman:</b> {sig.timestamp}"
-        message += f"\n<b>🏷️ #{sig.symbol} #{sig.timeframe} #{sig.direction}</b>"
-        
-        # Önce mesajı gönder
-        await send_telegram_with_retry(message)
-        
-        # Sonra grafiği gönder
-        await send_chart_to_telegram(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, sig.symbol, df, ind)
-        
-        logger.info(f"📤 Sinyal gönderildi: {sig.symbol} - {sig.direction} - Güç: {sig.strength_score:.1f}")
-        
-    except Exception as e:
-        logger.error(f"Sinyal gönderme hatası: {e}")
-        # En azından temel mesajı göndermeyi dene
-        try:
-            basic_message = f"🚨 SİNYAL: {sig.symbol} - {sig.direction} - Güç: {sig.strength_score:.1f}"
-            await send_telegram(basic_message)
-        except:
-            logger.error("Temel sinyal mesajı da gönderilemedi")
-
-# ----------------------- ANA DÖNGÜ -----------------------
-async def scan_and_report():
-    """Geliştirilmiş tarama ve raporlama"""
-    global LAST_SCAN_TIME, DAILY_SIGNALS
-    
-    start_time = time.time()
-    now_ist = dt.datetime.now(IST_TZ)
-    logger.info(f"⏳ Tarama başlatılıyor... ({len(TICKERS)} hisse x {len(TIMEFRAMES)} zaman dilimi)")
-
-    # Eski sinyalleri temizle
-    cleanup_old_signals()
-
-    if not is_market_hours():
-        logger.info(f"⌚ Borsa kapalı ({now_ist.strftime('%H:%M')}), tarama atlandı")
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("Telegram env değişkenleri boş; mesaj gönderilmeyecek.")
         return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, json=payload, timeout=20) as resp:
+                if resp.status != 200:
+                    txt = await resp.text()
+                    logger.error(f"Telegram hata: {resp.status} - {txt}")
+        except Exception as e:
+            logger.error(f"Telegram gönderim hatası: {e}")
 
-    # İstatistikler
-    total_tasks = len(TICKERS) * len(TIMEFRAMES)
-    processed_count = 0
-    error_count = 0
-    signal_count = 0
-
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=30),
-        connector=aiohttp.TCPConnector(limit=20, limit_per_host=10)
-    ) as session:
-        
-        found_signals: Set[str] = set()
-        tasks = []
-
-        # Görevleri oluştur
-        for symbol in TICKERS:
-            for tf in TIMEFRAMES:
-                if f"{symbol}_{tf}" not in FAILED_SYMBOLS:  # Başarısız olanları atla
-                    task = asyncio.create_task(
-                        fetch_and_analyze_data(session, symbol, tf)
-                    )
-                    tasks.append((task, symbol, tf))
-
-        # Batch olarak işle (aşırı yüklenmeyi önle)
-        batch_size = 50
-        for i in range(0, len(tasks), batch_size):
-            batch = tasks[i:i + batch_size]
-            batch_tasks = [task[0] for task in batch]
-            
-            logger.info(f"📊 Batch {i//batch_size + 1}/{(len(tasks) + batch_size - 1)//batch_size} işleniyor...")
-            
-            try:
-                results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-                
-                for j, result in enumerate(results):
-                    _, symbol, tf = batch[j]
-                    processed_count += 1
-                    
-                    if isinstance(result, Exception):
-                        logger.error(f"❌ Görev hatası {symbol}_{tf}: {result}")
-                        error_count += 1
-                        FAILED_SYMBOLS.add(f"{symbol}_{tf}")
-                        continue
-
-                    signal, df, ind = result
-                    
-                    if signal:
-                        signal_key = f"{signal.symbol}_{signal.timeframe}"
-                        
-                        if signal_key not in found_signals and signal_key not in DAILY_SIGNALS:
-                            found_signals.add(signal_key)
-                            DAILY_SIGNALS[signal_key] = asdict(signal)
-                            
-                            # Sinyali gönder
-                            await send_signal_with_chart(signal, df, ind)
-                            signal_count += 1
-                            
-                            logger.info(f"🎯 YENİ SİNYAL: {signal.symbol} ({signal.timeframe}) - "
-                                      f"{signal.direction} - Güç: {signal.strength_score:.1f} - "
-                                      f"Güven: {signal.confidence*100:.0f}%")
-                
-                # Batch'ler arası kısa bekleme
-                if i + batch_size < len(tasks):
-                    await asyncio.sleep(1)
-                    
-            except Exception as e:
-                logger.error(f"Batch işleme hatası: {e}")
-                error_count += len(batch_tasks)
-
-    # Sonuç raporu
-    elapsed_time = time.time() - start_time
-    success_rate = ((processed_count - error_count) / max(processed_count, 1)) * 100
-    
-    summary_message = (
-        f"✅ Tarama tamamlandı!\n"
-        f"📊 İşlenen: {processed_count}/{total_tasks}\n"
-        f"🎯 Bulunan sinyal: {signal_count}\n"
-        f"❌ Hata: {error_count}\n"
-        f"📈 Başarı oranı: {success_rate:.1f}%\n"
-        f"⏱️ Süre: {elapsed_time:.1f} saniye\n"
-        f"🔄 Toplam günlük sinyal: {len(DAILY_SIGNALS)}"
+def fmt_signal_message(s: SignalInfo) -> str:
+    arrow = "🟢" if s.direction == "BULLISH" else ("🔴" if s.direction == "BEARISH" else "⚪")
+    return (
+        f"{arrow} <b>{s.symbol}</b>  <code>{s.timeframe}</code>\n"
+        f"Fiyat: <b>{s.price:.2f}</b>  |  RSI: <b>{s.rsi:.2f}</b>  |  EMA66: <b>{'—' if s.ema is None else f'{s.ema:.2f}'}</b>\n"
+        f"Hacim Oranı: <b>{s.vol_ratio:.2f}</b>  |  İşlem Tutarı(≈): <b>{s.vol_try:,.0f} ₺</b>\n"
+        f"Skor: <b>{s.score:.2f}</b>  |  Yön: <b>{s.direction}</b>\n"
+        f"<i>{s.timestamp}</i>"
     )
-    
-    logger.info(summary_message.replace('\n', ' | '))
-    
-    # Özet mesajını sadece sinyal varsa gönder
-    if signal_count > 0:
-        await send_telegram_with_retry(f"📋 <b>Tarama Özeti</b>\n{summary_message}")
-    
-    LAST_SCAN_TIME = now_ist
 
-async def send_daily_summary():
-    """Günlük özet raporu"""
-    try:
-        now = dt.datetime.now(IST_TZ)
-        if now.hour == 18 and now.minute <= CHECK_EVERY_MIN:  # Borsa kapanışında
-            if DAILY_SIGNALS:
-                total_signals = len(DAILY_SIGNALS)
-                bullish_signals = sum(1 for s in DAILY_SIGNALS.values() if s['direction'] == 'BULLISH')
-                bearish_signals = total_signals - bullish_signals
-                
-                avg_strength = sum(s['strength_score'] for s in DAILY_SIGNALS.values()) / total_signals
-                avg_confidence = sum(s['confidence'] for s in DAILY_SIGNALS.values()) / total_signals
-                
-                summary = (
-                    f"📈 <b>Günlük Sinyal Özeti</b> 📉\n\n"
-                    f"📊 Toplam Sinyal: {total_signals}\n"
-                    f"🚀 Bullish: {bullish_signals}\n"
-                    f"📉 Bearish: {bearish_signals}\n"
-                    f"💪 Ortalama Güç: {avg_strength:.1f}/10\n"
-                    f"⭐ Ortalama Güven: {avg_confidence*100:.1f}%\n"
-                    f"🕐 Tarih: {now.strftime('%Y-%m-%d')}\n\n"
-                    f"#GünlükÖzet #BIST #CakmaUstad"
-                )
-                
-                await send_telegram_with_retry(summary)
-                logger.info("📋 Günlük özet gönderildi")
-    except Exception as e:
-        logger.error(f"Günlük özet hatası: {e}")
+# ------------------------------------------------------------
+# Tek sembol + timeframe analiz
+# ------------------------------------------------------------
+async def analyze_symbol_timeframe(symbol: str, timeframe: str) -> Optional[SignalInfo]:
+    data = await fetch_market_data(symbol, timeframe)
+    if not data:
+        return None
 
-async def run_scanner_periodically():
-    """Periyodik tarama çalıştırıcı"""
-    logger.info(f"🤖 CakmaUstad bot başlatıldı! Tarama aralığı: {CHECK_EVERY_MIN} dakika")
-    
-    # Başlangıç mesajı
-    start_message = (
-        f"🤖 <b>CakmaUstad Bot Başlatıldı!</b>\n\n"
-        f"📊 İzlenen hisse: {len(TICKERS)}\n"
-        f"⏰ Tarama aralığı: {CHECK_EVERY_MIN} dakika\n"
-        f"📈 Zaman dilimleri: {', '.join(TIMEFRAMES)}\n"
-        f"🎯 Min. sinyal gücü: {MIN_SIGNAL_SCORE}\n"
-        f"💰 Min. fiyat: {MIN_PRICE} TL\n"
-        f"🔊 Min. hacim: {MIN_VOLUME_TRY:,.0f} TL\n"
-        f"🚀 Hazırım!"
+    price = safe_float(data.get("Close"), np.nan)
+    rsi = data.get("RSI")
+    ema = data.get("EMA")
+    vol = data.get("Volume")
+
+    # yfinance'da Volume lot adedi; TRY tahmini için fiyata çarpıyoruz (yaklaşık)
+    vol_try = float(price) * float(vol) if (not pd.isna(price) and vol is not None and not pd.isna(vol)) else 0.0
+
+    sc = compute_score(price, rsi, ema, vol)
+    score = sc["score"]
+    direction = sc["direction"]
+    vol_ratio = sc["vol_ratio"]
+
+    if not passes_filters(price, vol_try):
+        return None
+    if score < MIN_SIGNAL_SCORE:
+        return None
+
+    return SignalInfo(
+        symbol=symbol,
+        timeframe=timeframe,
+        price=float(price),
+        rsi=float(rsi) if rsi is not None and not pd.isna(rsi) else float("nan"),
+        ema=float(ema) if ema is not None and not pd.isna(ema) else None,
+        vol_ratio=vol_ratio,
+        vol_try=vol_try,
+        score=score,
+        direction=direction,
+        timestamp=now_istanbul_str()
     )
-    
-    await send_telegram_with_retry(start_message)
-    
+
+# ------------------------------------------------------------
+# Batch tarama
+# ------------------------------------------------------------
+async def scan_batch(symbols: List[str], timeframes: List[str]) -> List[SignalInfo]:
+    tasks = []
+    for sym in symbols:
+        for tf in timeframes:
+            tasks.append(analyze_symbol_timeframe(sym, tf))
+
+    out: List[SignalInfo] = []
+    for chunk_start in range(0, len(tasks), BATCH_SIZE):
+        chunk = tasks[chunk_start:chunk_start + BATCH_SIZE]
+        results = await asyncio.gather(*chunk, return_exceptions=True)
+        for res in results:
+            if isinstance(res, SignalInfo):
+                out.append(res)
+            elif isinstance(res, Exception):
+                logger.debug(f"Analyze exception: {res}")
+            elif res:
+                # SignalInfo veya Exception değilse (None değilse)
+                out.append(res)
+        # TV rate-limit açısından küçük ara
+        await asyncio.sleep(1.0)
+    return out
+# ------------------------------------------------------------
+# Sembol listesi seçimi
+# ------------------------------------------------------------
+def get_symbol_universe() -> List[str]:
+    if SCAN_MODE == "CUSTOM" and CUSTOM_TICKERS:
+        return CUSTOM_TICKERS
+    # ALL modu: örnek kısa liste; kendi evrenini ekleyebilirsin
+    return DEFAULT_BIST_TICKERS
+
+# ------------------------------------------------------------
+# Periyodik tarama döngüsü
+# ------------------------------------------------------------
+async def periodic_scan():
+    logger.info("CakmaUstad scanner başlıyor...")
     while True:
         try:
-            # Ana taramayı çalıştır
-            await scan_and_report()
-            
-            # Günlük özet kontrolü
-            await send_daily_summary()
-            
-            # Sonraki taramaya kadar bekle
-            logger.info(f"💤 {CHECK_EVERY_MIN} dakika bekleniyor...")
-            await asyncio.sleep(CHECK_EVERY_MIN * 60)
-            
-        except KeyboardInterrupt:
-            logger.info("👋 Bot kapatılıyor...")
-            break
-        except Exception as e:
-            logger.error(f"🔥 Tarama döngü hatası: {e}")
-            error_message = f"⚠️ <b>Bot Hatası!</b>\n\nHata: {str(e)[:200]}...\n🔄 60 saniye sonra yeniden denenecek"
-            await send_telegram_with_retry(error_message)
-            await asyncio.sleep(60)  # Hata durumunda kısa bekleme
+            symbols = get_symbol_universe()
+            random.shuffle(symbols)  # hep aynı sırayı sorgulamayalım
 
-    # Kapanış mesajı
-    shutdown_message = "👋 <b>CakmaUstad Bot Kapatıldı</b>\n\nGörüşmek üzere! 🚀"
-    try:
-        await send_telegram(shutdown_message)
-    except:
-        pass
-
-# ----------------------- SAĞLIK KONTROLÜ -----------------------
-class HealthHandler(web.View):
-    """Geliştirilmiş sağlık kontrolü"""
-    async def get(self):
-        uptime_seconds = int(time.time() - START_TIME)
-        uptime_hours = uptime_seconds // 3600
-        uptime_minutes = (uptime_seconds % 3600) // 60
-        
-        # Bellek kullanımı (basit)
-        import psutil
-        process = psutil.Process()
-        memory_mb = process.memory_info().rss / 1024 / 1024
-        
-        response = {
-            "status": "healthy",
-            "service": "cakmaustad-rsi-scanner",
-            "version": "2.0.0",
-            "market_status": "AÇIK" if is_market_hours() else "KAPALI",
-            "uptime": f"{uptime_hours}s {uptime_minutes}d",
-            "uptime_seconds": uptime_seconds,
-            "scanned_stocks": len(TICKERS),
-            "timeframes": TIMEFRAMES,
-            "daily_signals": len(DAILY_SIGNALS),
-            "failed_symbols": len(FAILED_SYMBOLS),
-            "last_scan": LAST_SCAN_TIME.isoformat() if LAST_SCAN_TIME else None,
-            "memory_usage_mb": round(memory_mb, 2),
-            "settings": {
-                "check_interval_min": CHECK_EVERY_MIN,
-                "min_signal_score": MIN_SIGNAL_SCORE,
-                "min_price": MIN_PRICE,
-                "min_volume_try": MIN_VOLUME_TRY,
-                "concurrent_requests": CONCURRENT_REQUESTS
-            },
-            "timestamp": dt.datetime.now(IST_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
-        }
-        
-        return web.json_response(response)
-
-class StatsHandler(web.View):
-    """İstatistik endpoint'i"""
-    async def get(self):
-        try:
-            # Sinyal istatistikleri
-            bullish_count = sum(1 for s in DAILY_SIGNALS.values() if s['direction'] == 'BULLISH')
-            bearish_count = sum(1 for s in DAILY_SIGNALS.values() if s['direction'] == 'BEARISH')
-            
-            total_signals = len(DAILY_SIGNALS)
-            if total_signals > 0:
-                avg_strength = sum(s['strength_score'] for s in DAILY_SIGNALS.values()) / total_signals
-                avg_confidence = sum(s['confidence'] for s in DAILY_SIGNALS.values()) / total_signals
-                
-                # Zaman dilimi dağılımı
-                timeframe_dist = {}
-                for signal in DAILY_SIGNALS.values():
-                    tf = signal['timeframe']
-                    timeframe_dist[tf] = timeframe_dist.get(tf, 0) + 1
+            logger.info(f"Tarama başlıyor | Sembol sayısı: {len(symbols)} | TF: {','.join(TIMEFRAMES)}")
+            signals = await scan_batch(symbols, TIMEFRAMES)
+            if signals:
+                # Skora göre sırala, en yüksekleri yolla
+                signals.sort(key=lambda s: s.score, reverse=True)
+                top = signals[:10]  # spam olmasın diye en iyi 10
+                summary = [fmt_signal_message(s) for s in top]
+                text = "📈 <b>BIST Tarama Sinyalleri</b>\n\n" + "\n\n".join(summary)
+                await send_telegram(text)
+                logger.info(f"{len(top)} sinyal gönderildi.")
             else:
-                avg_strength = 0
-                avg_confidence = 0
-                timeframe_dist = {}
-            
-            # En aktif hisseler (sinyal sayısına göre)
-            symbol_count = {}
-            for signal in DAILY_SIGNALS.values():
-                symbol = signal['symbol']
-                symbol_count[symbol] = symbol_count.get(symbol, 0) + 1
-            
-            top_symbols = sorted(symbol_count.items(), key=lambda x: x[1], reverse=True)[:10]
-            
-            response = {
-                "total_signals": total_signals,
-                "signal_distribution": {
-                    "bullish": bullish_count,
-                    "bearish": bearish_count
-                },
-                "average_strength": round(avg_strength, 2),
-                "average_confidence": round(avg_confidence * 100, 1),
-                "timeframe_distribution": timeframe_dist,
-                "top_symbols": dict(top_symbols),
-                "failed_symbols_count": len(FAILED_SYMBOLS),
-                "scan_settings": {
-                    "total_stocks": len(TICKERS),
-                    "timeframes": TIMEFRAMES,
-                    "scan_interval": f"{CHECK_EVERY_MIN} minutes"
-                },
-                "last_update": dt.datetime.now(IST_TZ).isoformat()
-            }
-            
-            return web.json_response(response)
-            
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+                logger.info("Bu turda sinyal yok.")
 
-class SignalsHandler(web.View):
-    """Günlük sinyalleri listele"""
-    async def get(self):
-        try:
-            # Query parametrelerini al
-            limit = int(self.request.query.get('limit', 50))
-            direction = self.request.query.get('direction', '').upper()
-            min_strength = float(self.request.query.get('min_strength', 0))
-            
-            # Sinyalleri filtrele ve sırala
-            signals = list(DAILY_SIGNALS.values())
-            
-            if direction and direction in ['BULLISH', 'BEARISH']:
-                signals = [s for s in signals if s['direction'] == direction]
-            
-            if min_strength > 0:
-                signals = [s for s in signals if s['strength_score'] >= min_strength]
-            
-            # Güç skoruna göre sırala
-            signals.sort(key=lambda x: x['strength_score'], reverse=True)
-            
-            # Limit uygula
-            signals = signals[:limit]
-            
-            response = {
-                "signals": signals,
-                "total_count": len(signals),
-                "filters_applied": {
-                    "direction": direction or "ALL",
-                    "min_strength": min_strength,
-                    "limit": limit
-                },
-                "generated_at": dt.datetime.now(IST_TZ).isoformat()
-            }
-            
-            return web.json_response(response)
-            
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            logger.exception(f"Tarama hatası: {e}")
 
-class ResetHandler(web.View):
-    """Sinyalleri ve cache'i temizle"""
-    async def post(self):
-        try:
-            global DAILY_SIGNALS, FAILED_SYMBOLS
-            
-            old_signals = len(DAILY_SIGNALS)
-            old_failed = len(FAILED_SYMBOLS)
-            
-            DAILY_SIGNALS.clear()
-            FAILED_SYMBOLS.clear()
-            
-            response = {
-                "status": "success",
-                "message": "Cache temizlendi",
-                "cleared": {
-                    "signals": old_signals,
-                    "failed_symbols": old_failed
-                },
-                "timestamp": dt.datetime.now(IST_TZ).isoformat()
-            }
-            
-            logger.info(f"🗑️ Cache temizlendi: {old_signals} sinyal, {old_failed} başarısız sembol")
-            return web.json_response(response)
-            
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        # Sonraki tura kadar bekle
+        await asyncio.sleep(CHECK_EVERY_MIN * 60)
 
-async def start_web_server():
-    """Web server'ı başlat"""
+# ------------------------------------------------------------
+# Basit healthcheck (opsiyonel)
+# ------------------------------------------------------------
+async def run_health_server():
+    from aiohttp import web
+    async def health(_):
+        return web.json_response({"status": "ok", "time": now_istanbul_str()})
     app = web.Application()
-    
-    # Route'ları ekle
-    app.router.add_get('/health', HealthHandler)
-    app.router.add_get('/stats', StatsHandler)
-    app.router.add_get('/signals', SignalsHandler)
-    app.router.add_post('/reset', ResetHandler)
-    
-    # CORS desteği (basit)
-    async def cors_handler(request, handler):
-        response = await handler(request)
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-        return response
-    
-    app.middlewares.append(cors_handler)
-    
-    # Server'ı başlat
+    app.router.add_get("/health", health)
     runner = web.AppRunner(app)
     await runner.setup()
-    
-    site = web.TCPSite(runner, '0.0.0.0', HEALTH_CHECK_PORT)
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
-    
-    logger.info(f"🌐 Web server başlatıldı: http://0.0.0.0:{HEALTH_CHECK_PORT}")
-    logger.info(f"📋 Endpoints:")
-    logger.info(f"   GET  /health  - Sağlık kontrolü")
-    logger.info(f"   GET  /stats   - İstatistikler")
-    logger.info(f"   GET  /signals - Günlük sinyaller")
-    logger.info(f"   POST /reset   - Cache temizle")
+    logger.info("Health server 0.0.0.0:8080/health")
 
-# ----------------------- ANA FONKSİYON -----------------------
+# ------------------------------------------------------------
+# main
+# ------------------------------------------------------------
 async def main():
-    """Ana uygulama"""
-    try:
-        logger.info("🚀 CakmaUstad RSI Scanner başlatılıyor...")
-        
-        # Ayarları logla
-        logger.info(f"📊 Ayarlar:")
-        logger.info(f"   Hisse sayısı: {len(TICKERS)}")
-        logger.info(f"   Zaman dilimleri: {TIMEFRAMES}")
-        logger.info(f"   Tarama aralığı: {CHECK_EVERY_MIN} dakika")
-        logger.info(f"   Min sinyal gücü: {MIN_SIGNAL_SCORE}")
-        logger.info(f"   Min fiyat: {MIN_PRICE} TL")
-        logger.info(f"   Min hacim: {MIN_VOLUME_TRY:,} TL")
-        logger.info(f"   Eşzamanlı istek: {CONCURRENT_REQUESTS}")
-        
-        # Web server ve tarayıcıyı eşzamanlı başlat
-        await asyncio.gather(
-            start_web_server(),
-            run_scanner_periodically()
-        )
-        
-    except KeyboardInterrupt:
-        logger.info("👋 Uygulama kullanıcı tarafından sonlandırıldı")
-    except Exception as e:
-        logger.error(f"🔥 Kritik hata: {e}")
-        # Acil durum mesajı
-        try:
-            emergency_msg = f"🚨 <b>KRİTİK HATA!</b>\n\nBot durdu: {str(e)[:200]}...\n\nLütfen kontrol edin!"
-            await send_telegram(emergency_msg)
-        except:
-            pass
-        raise
-    finally:
-        logger.info("🛑 CakmaUstad Bot kapatıldı")
+    # Health server ve taramayı birlikte çalıştır
+    await asyncio.gather(
+        run_health_server(),
+        periodic_scan()
+    )
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
-        # Asyncio policy ayarla (Windows uyumluluğu için)
-        if hasattr(asyncio, 'set_event_loop_policy'):
-            if os.name == 'nt':  # Windows
-                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        
-        # Ana uygulamayı çalıştır
         asyncio.run(main())
-        
     except KeyboardInterrupt:
-        print("\n👋 Bot kapatılıyor...")
-    except Exception as e:
-        print(f"\n🔥 Başlatma hatası: {e}")
-        sys.exit(1)
+        logger.info("Durduruldu.")
