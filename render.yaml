@@ -40,7 +40,7 @@ services:
         value: "1000000"
         sync: false
       - key: MIN_SIGNAL_SCORE
-        value: "1.25"
+        value: "1.15"
         sync: false
 
       # --- Loglama Ayarları ---
