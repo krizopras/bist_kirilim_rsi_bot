@@ -186,7 +186,6 @@ ALL_BIST_STOCKS = [
     "YBTAS.IS", "YIGIT.IS", "YONGA.IS", "YKSLN.IS", "YUNSA.IS", "ZEDUR.IS", "ZRGYO.IS", "ZKBVK.IS", "ZKBVR.IS", "ZOREN.IS",
     "BINHO.IS"
 ]
-]
 
 if SCAN_MODE.upper() == "CUSTOM" and CUSTOM_TICKERS_STR:
     TICKERS = [t.strip() for t in CUSTOM_TICKERS_STR.split(',')]
