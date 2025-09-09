@@ -656,8 +656,8 @@ async def scan_and_report():
         tasks = []
         for symbol in TICKERS:
             for tf in TIMEFRAMES:
-                # Sinyal tekrar kontrolü buraya gelecek
-                
+                # Her istek arasında 0.5 saniye bekleme ekleyin
+                await asyncio.sleep(0.5)
                 tasks.append(asyncio.create_task(
                     fetch_and_analyze_data(session, symbol, tf)
                 ))
