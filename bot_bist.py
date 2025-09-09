@@ -641,9 +641,8 @@ async def scan_and_report():
     
     cleanup_old_signals()
     
-    if not is_market_hours():
-        logger.info("Piyasa kapalı, tarama atlandı")
-        return
+    # NOT: is_market_hours() kontrolü kaldırıldı.
+    # Bot artık her zaman tarama yapacak.
 
     processed = 0
     errors = 0
@@ -657,6 +656,8 @@ async def scan_and_report():
         tasks = []
         for symbol in TICKERS:
             for tf in TIMEFRAMES:
+                # Sinyal tekrar kontrolü buraya gelecek
+                
                 tasks.append(asyncio.create_task(
                     fetch_and_analyze_data(session, symbol, tf)
                 ))
@@ -680,10 +681,10 @@ async def scan_and_report():
                     if signal:
                         signal_key = f"{signal.symbol}_{signal.timeframe}"
                         
-                        if signal_key not in DAILY_SIGNALS:
-                            DAILY_SIGNALS[signal_key] = asdict(signal)
-                            await send_signal_with_chart(signal, df, ind)
-                            signals_found += 1
+                        # Sinyal bulunduğunda yapılacak işlemler
+                        
+                        await send_signal_with_chart(signal, df, ind)
+                        signals_found += 1
                 
                 # Batch arası bekleme
                 if i + batch_size < len(tasks):
