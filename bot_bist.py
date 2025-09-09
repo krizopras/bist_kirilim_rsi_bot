@@ -813,7 +813,7 @@ async def send_signal_with_chart(sig: SignalInfo, df: pd.DataFrame, ind: Dict[st
         message += f"<b>🔊 Hacim:</b> {sig.volume_try / 1_000_000:.2f}M TL ({sig.volume_ratio:.1f}x)\n"
         
         if sig.trend_break:
-        message += f"<b>⚡ Trend Kırılımı:</b> {sig.trend_break}\n"      
+            message += f"<b>⚡ Trend Kırılımı:</b> {sig.trend_break}\n"      
         message += f"\n<b>🕐 Zaman:</b> {sig.timestamp}"
         message += f"\n<b>🏷️ #{sig.symbol} #{sig.timeframe} #{sig.direction}</b>"
         
