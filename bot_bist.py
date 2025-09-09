@@ -185,7 +185,7 @@ ALL_BIST_STOCKS = [
     "YAT", "YFMEN", "YATVK", "YYLGD", "YAYLA", "YGGYO", "YEOTK", "YGYO", "YYAPI", "YESIL",
     "YBTAS", "YIGIT", "YONGA", "YKSLN", "YUNSA", "ZEDUR", "ZRGYO", "ZKBVK", "ZKBVR", "ZOREN",
     "BINHO"
-
+]
 
 if SCAN_MODE.upper() == "CUSTOM" and CUSTOM_TICKERS_STR:
     TICKERS = [t.strip() for t in CUSTOM_TICKERS_STR.split(',')]
