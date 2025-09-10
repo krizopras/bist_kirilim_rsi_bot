@@ -311,60 +311,64 @@ def calculate_ema(series: pd.Series, period: int = 20) -> pd.Series:
         logger.warning(f"EMA hesaplama hatası: {e}")
         return series
 
-# DÜZELTME: Async fetch fonksiyonu düzeltildi
-# DÜZELTME: Async fetch fonksiyonu düzeltildi
+# Hafifletilmiş: Bellek dostu yfinance fetch
 async def fetch_yfinance_data(symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-    """Yahoo Finance'dan veri çek (fallback ile)"""
+    """Yahoo Finance'dan sadece son barı çek (hafifletilmiş sürüm)"""
     yf_symbol = get_yfinance_ticker(symbol)
     yf_interval = get_yfinance_interval(timeframe)
     
     try:
         logger.debug(f"YF veri çekiliyor: {yf_symbol} ({yf_interval})")
-        
+
         def fetch_data():
             ticker = yf.Ticker(yf_symbol)
-            # Ana deneme
-            period = "6mo" if timeframe == "1d" else "1mo"
+            # Daha kısa period seç -> bellek tasarrufu
+            period = "3mo" if timeframe == "1d" else "5d"
             hist = ticker.history(period=period, interval=yf_interval, timeout=10)
-            
-            # Eğer boş dönerse fallback
+
+            # Fallback: eğer boş dönerse
             if hist.empty:
-                logger.warning(f"Fallback aktif: {yf_symbol} için kısa period denenecek")
+                logger.warning(f"Fallback: {yf_symbol} için 1mo/1d denenecek")
                 hist = ticker.history(period="1mo", interval="1d", timeout=10)
             
             return hist
-        
+
         loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             history = await loop.run_in_executor(executor, fetch_data)
-        
+
+        # Veri kontrolü
         if history.empty or len(history) < 2:
             logger.debug(f"Yetersiz veri: {yf_symbol}")
             return None
-        
-        # RSI ve EMA hesapla
-        history['RSI'] = calculate_rsi(history, RSI_LEN)
-        history['EMA'] = calculate_ema(history['Close'], RSI_EMA_LEN)
-        
-        # Son veriyi al
+
+        # Sadece son satırı al
         latest = history.iloc[-1]
-        
+
+        # RSI ve EMA hesaplamak için çok bar lazım -> küçük dilim
+        sub_hist = history.tail(RSI_LEN + RSI_EMA_LEN + 5).copy()
+        sub_hist['RSI'] = calculate_rsi(sub_hist, RSI_LEN)
+        sub_hist['EMA'] = calculate_ema(sub_hist['Close'], RSI_EMA_LEN)
+
+        latest_rsi = safe_float_convert(sub_hist['RSI'].iloc[-1], 50.0)
+        latest_ema = safe_float_convert(sub_hist['EMA'].iloc[-1], latest['Close'])
+
         result = {
             'Close': safe_float_convert(latest['Close']),
             'Volume': safe_float_convert(latest['Volume']),
             'High': safe_float_convert(latest['High']),
             'Low': safe_float_convert(latest['Low']),
             'Open': safe_float_convert(latest['Open']),
-            'RSI': safe_float_convert(latest['RSI'], 50.0),
-            'EMA': safe_float_convert(latest['EMA'], latest['Close'])
+            'RSI': latest_rsi,
+            'EMA': latest_ema
         }
-        
-        # Temel validasyon
+
+        # Validasyon
         if result['Close'] <= 0 or result['Volume'] < 0:
             return None
-            
+
         return result
-        
+
     except Exception as e:
         logger.debug(f"YF fetch hata {yf_symbol}: {str(e)[:100]}")
         return None
@@ -671,7 +675,7 @@ async def scan_and_report():
                 ))
 
         # Küçük batch'ler halinde işle
-        batch_size = 20
+        batch_size = 5
         for i in range(0, len(tasks), batch_size):
             batch = tasks[i:i + batch_size]
             
