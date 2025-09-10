@@ -1,30 +1,29 @@
 services:
-  - type: worker
-    name: cakmaustad-bot
+  - type: web
+    name: bist-bot
     env: python
-    buildCommand: |
-      pip install --no-cache-dir tradingview_ta yfinance aiohttp python-dotenv pandas numpy pytz
-    startCommand: python bot_bist.py
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot_bist.py"
+    plan: starter
+    autoDeploy: true
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        value: ${TELEGRAM_BOT_TOKEN}
+        sync: false # Güvenlik için, değeri Render panelinden ekleyin
       - key: TELEGRAM_CHAT_ID
-        value: ${TELEGRAM_CHAT_ID}
-      - key: SCAN_MODE
-        value: ${SCAN_MODE}
-      - key: CUSTOM_TICKERS
-        value: ${CUSTOM_TICKERS}
-      - key: CHECK_EVERY_MIN
-        value: ${CHECK_EVERY_MIN}
-      - key: TIMEFRAMES
-        value: ${TIMEFRAMES}
-      - key: MIN_PRICE
-        value: ${MIN_PRICE}
+        sync: false
       - key: MIN_VOLUME_TRY
-        value: ${MIN_VOLUME_TRY}
+        value: "1000000"
+      - key: MAX_SYMBOLS
+        value: "100"
       - key: MIN_SIGNAL_SCORE
-        value: ${MIN_SIGNAL_SCORE}
+        value: "2.5"
+      - key: CONCURRENCY
+        value: "5"
+      - key: SIGNAL_COOLDOWN_H
+        value: "6"
+      - key: MIN_PRICE
+        value: "1.0"
+      - key: SCAN_INTERVAL_SEC
+        value: "900"
       - key: LOG_LEVEL
-        value: ${LOG_LEVEL}
-      - key: CONCURRENT_REQUESTS
-        value: ${CONCURRENT_REQUESTS}
+        value: "INFO"
