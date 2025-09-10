@@ -813,26 +813,31 @@ async def init_app():
     return app
 
 def main():
-    loop = asyncio.get_event_loop()
-    for s in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(s, lambda s=s: _signal_handler(s))
-        except NotImplementedError:
-            # Windows fallback if required
-            pass
-
-    app = loop.run_until_complete(init_app())
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8080"))
-
-    logger.info(f"Başlatılıyor — host={host} port={port} TEST_MODE={TEST_MODE}")
     try:
-        web.run_app(app, host=host, port=port)
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Kapatılıyor...")
-    finally:
-        loop.run_until_complete(app["session"].close())
-        logger.info("Çıkış tamamlandı.")
+    loop = asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+for s in (signal.SIGINT, signal.SIGTERM):
+    try:
+        loop.add_signal_handler(s, lambda s=s: _signal_handler(s))
+    except NotImplementedError:
+        # Windows fallback if required
+        pass
+
+app = loop.run_until_complete(init_app())
+host = os.getenv("HOST", "0.0.0.0")
+port = int(os.getenv("PORT", "8080"))
+
+logger.info(f"Başlatılıyor — host={host} port={port} TEST_MODE={TEST_MODE}")
+try:
+    web.run_app(app, host=host, port=port)
+except (KeyboardInterrupt, SystemExit):
+    logger.info("Kapatılıyor...")
+finally:
+    loop.run_until_complete(app["session"].close())
+    logger.info("Çıkış tamamlandı.")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
