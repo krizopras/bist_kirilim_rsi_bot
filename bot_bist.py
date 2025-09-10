@@ -296,22 +296,23 @@ async def mark_signal_sent(symbol: str, entry: float, score: float, rsi: float, 
 class BistDataClient:
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
+        # Alpha Vantage için API anahtarını çevre değişkeninden al
+        self.av_api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
 
     async def _fetch_with_fallback(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
         """Fallback veri kaynakları ile veri çekme"""
-        # 1. Öncelik: Yahoo Finance
+        # 1. Öncelik: Alpha Vantage
+        if self.av_api_key:
+            try:
+                return await self._fetch_alpha_vantage(symbol, timeframe)
+            except Exception as e:
+                logger.debug(f"Alpha Vantage başarısız {symbol}: {e}")
+
+        # 2. Öncelik: Yahoo Finance
         try:
             return await self._fetch_yahoo(symbol, timeframe)
         except Exception as e:
             logger.debug(f"Yahoo Finance başarısız {symbol}: {e}")
-
-        # 2. Öncelik: Yeni kaynak (Investing.com, Mynet vb.)
-        # Buraya Investing veya Mynet veri çekme fonksiyonunuzu ekleyebilirsiniz.
-        # Örneğin:
-        # try:
-        #     return await self._fetch_investing(symbol, timeframe)
-        # except Exception as e:
-        #     logger.debug(f"Investing.com başarısız {symbol}: {e}")
 
         # 3. Son Çare: Mock data
         return self._generate_mock_data(symbol)
@@ -375,53 +376,62 @@ class BistDataClient:
         except (ValueError, KeyError) as e:
             raise ValueError(f"Yahoo Finance veri formatı hatası: {e}")
 
-    async def _fetch_investing(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-        """
-        Investing.com gibi bir kaynaktan veri çekmek için tasarlanmış şablon.
-        Bu fonksiyon, Investing.com'un halka açık API'si olmadığı için doğrudan çalışmaz.
-        Bu alana, ücretli bir API veya web kazıma kodunuzu ekleyebilirsiniz.
-        """
-        logger.info(f"Investing için veri çekme denemesi: {symbol}, {timeframe}")
-        # Buraya gerçek veri çekme kodunuzu ekleyin. Örneğin:
-        # await RATE_LIMITER.acquire()
-        # url = "..."
-        # params = {"symbol": symbol, ...}
-        # async with self.session.get(url, params=params) as response:
-        #    ...
-        #    df = ... # DataFrame'i oluşturun
-        #    df = self._calculate_indicators(df)
-        #    return {"df": df, "current": ...}
-        raise NotImplementedError("Investing.com/Mynet için veri çekme metodu uygulanmadı.")
+    async def _fetch_alpha_vantage(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+        """Alpha Vantage'dan veri çekme fonksiyonu"""
+        if not self.av_api_key:
+            raise ValueError("Alpha Vantage API anahtarı ayarlanmamış.")
 
-    def _generate_mock_data(self, symbol: str) -> Dict[str, Any]:
-        """Basit mock data oluştur"""
-        np.random.seed(abs(hash(symbol)) % 2**32)
-        base_price = np.random.uniform(5, 50)
-        dates = pd.date_range(end=dt.datetime.now(), periods=100, freq='1H')
-        returns = np.random.normal(0, 0.02, 100)
-        prices = [base_price]
-        for ret in returns[1:]:
-            prices.append(prices[-1] * (1 + ret))
-        df = pd.DataFrame({
-            "timestamp": [d.timestamp() for d in dates],
-            "open": prices,
-            "high": [p * (1 + abs(np.random.normal(0, 0.01))) for p in prices],
-            "low": [p * (1 - abs(np.random.normal(0, 0.01))) for p in prices],
-            "close": prices,
-            "volume": np.random.uniform(100000, 1000000, 100)
-        })
-        df = self._calculate_indicators(df)
-        return {
-            "df": df,
-            "current": {
-                "price": float(df["close"].iloc[-1]),
-                "volume": float(df["volume"].iloc[-1]),
-                "rsi": float(df["rsi"].iloc[-1]),
-                "ema13": float(df["ema13"].iloc[-1]),
-                "ema55": float(df["ema55"].iloc[-1])
+        function = 'TIME_SERIES_DAILY_ADJUSTED'
+        interval = None
+        if timeframe in ['1h', '4h', '15m']:
+            function = 'TIME_SERIES_INTRADAY'
+            if timeframe == '4h':
+                # Alpha Vantage 4h aralığı sağlamaz, 60min kullanacağız.
+                interval = '60min'
+            else:
+                interval = timeframe.replace('h', 'min')
+
+        url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}.IS&outputsize=full&apikey={self.av_api_key}"
+        if interval:
+            url += f"&interval={interval}"
+
+        await RATE_LIMITER.acquire()
+        
+        async with self.session.get(url, timeout=CONFIG.http_timeout) as response:
+            if response.status != 200:
+                raise ValueError(f"HTTP {response.status}")
+            data = await response.json()
+            
+            if 'Error Message' in data:
+                raise ValueError(f"Alpha Vantage hatası: {data['Error Message']}")
+            
+            time_series_key = "Time Series (Daily)" if function == 'TIME_SERIES_DAILY_ADJUSTED' else f"Time Series ({interval})"
+            if time_series_key not in data:
+                raise ValueError(f"Alpha Vantage'dan veri alınamadı: {data}")
+
+            df = pd.DataFrame.from_dict(data[time_series_key], orient='index').astype(float)
+            df.index = pd.to_datetime(df.index)
+            df = df.sort_index()
+            
+            df.columns = ['open', 'high', 'low', 'close', 'adjusted close', 'volume', 'dividend amount', 'split coefficient'] if function == 'TIME_SERIES_DAILY_ADJUSTED' else ['open', 'high', 'low', 'close', 'volume']
+            df['close'] = df['adjusted close'] if 'adjusted close' in df.columns else df['close']
+            df = df[['open', 'high', 'low', 'close', 'volume']]
+            
+            if len(df) < 50:
+                raise ValueError("Yetersiz veri")
+            
+            df = self._calculate_indicators(df)
+
+            return {
+                "df": df,
+                "current": {
+                    "price": float(df["close"].iloc[-1]),
+                    "volume": float(df["volume"].iloc[-1]),
+                    "rsi": float(df["rsi"].iloc[-1]),
+                    "ema13": float(df["ema13"].iloc[-1]),
+                    "ema55": float(df["ema55"].iloc[-1])
+                }
             }
-        }
-
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Teknik göstergeleri hesapla"""
         delta = df["close"].diff()
