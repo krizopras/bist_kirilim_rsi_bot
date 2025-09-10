@@ -37,10 +37,10 @@ import matplotlib.pyplot as plt
 # Karakter kodlama düzeltmesi
 try:
     locale.setlocale(locale.LC_ALL, 'tr_TR.UTF-8')
-except:
+except locale.Error:
     try:
         locale.setlocale(locale.LC_ALL, 'Turkish_Turkey.1254')
-    except:
+    except locale.Error:
         pass
 
 # -------------------- LOGGING --------------------
@@ -75,7 +75,7 @@ def _safe_read_jsonl(path: str) -> List[dict]:
                     continue
                 try:
                     rows.append(json.loads(line))
-                except Exception:
+                except json.JSONDecodeError:
                     continue
     except Exception:
         return []
@@ -94,6 +94,7 @@ class BistBotConfig:
     weight_ema: float = 2.5
     weight_momentum: float = 2.0
     weight_breakout: float = 3.0
+    weight_volume: float = 1.0  # Yeni ağırlık
 
     timeframes: Tuple[str, ...] = ("1h", "4h", "1d")
     http_timeout: int = 15
@@ -129,16 +130,82 @@ IST_TZ = pytz.timezone('Europe/Istanbul')
 
 # -------------------- BIST HISSE LISTESI --------------------
 ALL_BIST_STOCKS = [
-    "AKBNK", "THYAO", "ISCTR", "GARAN", "HALKB", "VAKBN", "SASA", "FROTO",
-    "ARCLK", "TMSN", "TUPRS", "ASELS", "KCHOL", "SAHOL", "EREGL", "TCELL",
-    "PGSUS", "SISE", "ENKAI", "MGROS", "AEFES", "DOHOL", "KOZAL", "ALARK",
-    "TOASO", "PETKM", "TRKCM", "TTKOM", "QNBTR", "AKSA", "AYGAZ", "BIMAS",
-    "BRISA", "CEMTS", "CIMSA", "DEVA", "DGKLB", "DOAS", "DURDO", "DYOBY",
-    "EGEEN", "ENJSA", "FENER", "GOODY", "GUBRF", "HEKTS", "IHLAS", "INDES",
-    "IZMDC", "KARSN", "KLSER", "KONTR", "KORDS", "KOZAA", "KRDMD", "LOGO",
-    "MAVI", "METRO", "NTHOL", "OTKAR", "PARSN", "PINSU", "ROYAL", "SOKM",
-    "TBORG", "TEKTU", "TKFEN", "TRCAS", "ULKER", "VESTL", "YKBNK", "ZOREN"
+    "ADEL.IS", "ADESE.IS", "ADGYO.IS", "AFYON.IS", "AGHOL.IS", "AGESA.IS", "AGROT.IS", "AHSGY.IS", "AHGAZ.IS",
+    "AKBNK.IS", "AKCNS.IS", "AKYHO.IS", "AKENR.IS", "AKFGY.IS", "AKFYE.IS", "ATEKS.IS", "AKSGY.IS",
+    "AKSA.IS", "AKSEN.IS", "AKGRT.IS", "AKSUE.IS", "ALCAR.IS", "ALGYO.IS", "ALARK.IS", "ALBRK.IS", "ALKIM.IS", "ALKA.IS",
+    "ALVES.IS", "ANSGR.IS", "AEFES.IS", "ANHYT.IS", "ASUZU.IS", "ANGEN.IS", "ANELE.IS", "ARCLK.IS", "ARDYZ.IS", "ARENA.IS",
+    "ARMGD.IS", "ARSAN.IS", "ARTMS.IS", "ARZUM.IS", "ASGYO.IS", "ASELS.IS", "ASTOR.IS", "ATAGY.IS", "ATAKP.IS", "AGYO.IS",
+    "ATSYH.IS", "ATLAS.IS", "ATATP.IS", "AVOD.IS", "AVGYO.IS", "AVTUR.IS", "AVHOL.IS", "AVPGY.IS", "AYDEM.IS", "AYEN.IS",
+    "AYES.IS", "AYGAZ.IS", "AZTEK.IS", "A1CAP.IS", "BAGFS.IS", "BAHKM.IS", "BAKAB.IS", "BALAT.IS",
+    "BALSU.IS", "BNTAS.IS", "BANVT.IS", "BARMA.IS", "BSRFK.IS", "BASGZ.IS", "BASCM.IS", "BEGYO.IS", "BTCIM.IS", "BSOKE.IS",
+    "BYDNR.IS", "BAYRK.IS", "BERA.IS", "BRKT.IS", "BRKSN.IS", "BJKAS.IS", "BEYAZ.IS", "BIENY.IS", "BLCYT.IS",
+    "BIMAS.IS", "BINBN.IS", "BIOEN.IS", "BRKVY.IS", "BRKO.IS", "BIGEN.IS", "BRLSM.IS", "BRMEN.IS", "BIZIM.IS",
+    "BMSTL.IS", "BMSCH.IS", "BNPPI.IS", "BOBET.IS", "BORSK.IS", "BORLS.IS", "BRSAN.IS", "BRYAT.IS", "BFREN.IS", "BOSSA.IS",
+    "BRISA.IS", "BURCE.IS", "BURVA.IS", "BUCIM.IS", "BVSAN.IS", "BIGCH.IS", "CRFSA.IS", "CASA.IS", "CEOEM.IS",
+    "CCOLA.IS", "CONSE.IS", "COSMO.IS", "CRDFA.IS", "CVKMD.IS", "CWENE.IS",
+    "CAGFA.IS", "CANTE.IS", "CATES.IS", "CLEBI.IS", "CELHA.IS", "CLKMT.IS", "CEMAS.IS", "CEMTS.IS", "CMBTN.IS",
+    "CMENT.IS", "CIMSA.IS", "CUSAN.IS", "DVRLK.IS", "DAGI.IS", "DAPGM.IS", "DARDL.IS", "DGATE.IS", "DCTTR.IS",
+    "DGRVK.IS", "DMSAS.IS", "DENGE.IS", "DZGYO.IS", "DENIZ.IS", 
+    "DERIM.IS", "DERHL.IS", "DESA.IS", "DEVA.IS", "DNISI.IS", "DIRIT.IS",
+    "DMRGD.IS", "DOCO.IS", "DOFER.IS", "DOBUR.IS", "DOHOL.IS", "DGNMO.IS", "ARASE.IS", "DOGUB.IS", "DGGYO.IS",
+    "DOAS.IS",  "DOKTA.IS", "DURDO.IS",  "DYOBY.IS", "EBEBK.IS", "ECZYT.IS", "EDATA.IS",
+    "EDIP.IS", "EFORC.IS", "EGEEN.IS", "EGGUB.IS", "EGPRO.IS", "EGSER.IS", "EPLAS.IS", "EGEGY.IS", "ECILC.IS", "EKER.IS",
+    "EKIZ.IS", "EKOS.IS",  "EKSUN.IS", "ELITE.IS", "EMKEL.IS", "EMNIS.IS", 
+    "DMLKT.IS", "EKGYO.IS", "ENJSA.IS", "ENERY.IS", "ENKAI.IS", "ENSRI.IS", "ERBOS.IS", "ERCB.IS",
+    "EREGL.IS", "KIMMR.IS", "ERSU.IS", "ESCAR.IS", "ESCOM.IS", "ESEN.IS", "ETILR.IS", "EUKYO.IS", "EUYO.IS", "ETYAT.IS",
+    "EUHOL.IS", "TEZOL.IS", "EUREN.IS", "EUPWR.IS", "EYGYO.IS", "FADE.IS", "FMIZP.IS", "FENER.IS",
+    "FBBNK.IS", "FLAP.IS", "FONET.IS", "FROTO.IS", "FORMT.IS", "FORTE.IS", "FRIGO.IS", "FZLGY.IS", "GWIND.IS",
+    "GSRAY.IS", "GARFA.IS", "GARFL.IS", "GRNYO.IS", "GEDIK.IS", "GEDZA.IS", "GLCVY.IS", "GENIL.IS", "GENTS.IS", "GEREL.IS",
+    "GZNMI.IS", "GIPTA.IS", "GMTAS.IS", "GESAN.IS", "GLBMD.IS", "GLYHO.IS",  "GOODY.IS",
+    "GOKNR.IS", "GOLTS.IS", "GOZDE.IS", "GRTHO.IS", "GSDDE.IS", "GSDHO.IS", "GUBRF.IS", "GLRYH.IS", "GLRMK.IS", "GUNDG.IS",
+    "GRSEL.IS", "SAHOL.IS", "HALKF.IS", "HLGYO.IS", "HLVKS.IS", "HALKI.IS", "HRKET.IS", "HATEK.IS", "HATSN.IS",
+    "HDFGS.IS", "HEDEF.IS", "HEKTS.IS",
+    "HTTBT.IS", "HOROZ.IS", "HUBVC.IS", "HUNER.IS", "HUZFA.IS", "HURGZ.IS", "ENTRA.IS", "ICBCT.IS",
+    "INGRM.IS", "INVEO.IS", "INVAZ.IS", "INVES.IS", "ISKPL.IS", "IEYHO.IS", "IDGYO.IS", "IHEVA.IS", "IHLGM.IS",
+    "IHGZT.IS", "IHAAS.IS", "IHLAS.IS", "IHYAY.IS", "IMASM.IS", "INDES.IS", "INFO.IS", "INTEK.IS",
+    "INTEM.IS", "IPEKE.IS", "ISDMR.IS", "ISTFK.IS", "ISFAK.IS", "ISFIN.IS", "ISGYO.IS", "ISGSY.IS", "ISMEN.IS",
+    "ISYAT.IS", "ISBIR.IS", "ISSEN.IS", "IZINV.IS", "IZENR.IS", "IZMDC.IS", "IZFAS.IS", "JANTS.IS", "KFEIN.IS", "KLKIM.IS",
+    "KLSER.IS",  "KAPLM.IS", "KRDMA.IS", "KRDMB.IS", "KRDMD.IS", "KAREL.IS", "KARSN.IS",
+    "KRTEK.IS", "KARTN.IS",  "KTLEV.IS", "KATMR.IS", "KAYSE.IS", "KENT.IS", "KRVGD.IS", "KERVN.IS",
+    "KZBGY.IS", "KLGYO.IS", "KLRHO.IS", "KMPUR.IS", "KLMSN.IS", "KCAER.IS",  "KOCFN.IS", "KCHOL.IS",
+    "KOCMT.IS", "KLSYN.IS", "KNFRT.IS", "KONTR.IS", "KONYA.IS", "KONKA.IS", "KGYO.IS", "KORDS.IS", "KRPLS.IS",
+    "KOTON.IS", "KOZAL.IS", "KOZAA.IS", "KOPOL.IS", "KRGYO.IS", "KRSTL.IS", "KRONT.IS", "KSTUR.IS",
+    "KUVVA.IS", "KUYAS.IS", "KBORU.IS", "KZGYO.IS", "KUTPO.IS", "KTSKR.IS", "LIDER.IS", "LIDFA.IS", "LILAK.IS",
+    "LMKDC.IS", "LINK.IS", "LOGO.IS", "LKMNH.IS", "LRSHO.IS", "LUKSK.IS", "LYDHO.IS", "LYDYE.IS", "MACKO.IS", "MAKIM.IS",
+    "MAKTK.IS", "MANAS.IS", "MRBAS.IS", "MAGEN.IS", "MRMAG.IS", "MARKA.IS", "MAALT.IS", "MRSHL.IS", "MRGYO.IS",
+    "MARTI.IS", "MTRKS.IS", "MAVI.IS", "MZHLD.IS", "MEDTR.IS", "MEGMT.IS", "MEGAP.IS", "MEKAG.IS", "MEKMD.IS", 
+    "MNDRS.IS", "MEPET.IS", "MERCN.IS", "MERIT.IS", "MERKO.IS", "METUR.IS", "METRO.IS", "MTRYO.IS",
+    "MHRGY.IS", "MIATK.IS", "MGROS.IS", "MSGYO.IS", "MSYBN.IS", "MPARK.IS", "MMCAS.IS", "MNGFA.IS", "MOBTL.IS",
+    "MOGAN.IS", "MNDTR.IS", "MOPAS.IS", "EGEPO.IS", "NATEN.IS", "NTGAZ.IS", "NTHOL.IS", "NETAS.IS", "NIBAS.IS", "NUHCM.IS",
+    "NUGYO.IS", "NRHOL.IS", "OBAMS.IS", "OBASE.IS", "ODAS.IS", "ODINE.IS",
+    "OFSYM.IS", "ONCSM.IS", "ONRYT.IS", "OPET.IS", "ORCAY.IS", "ORFIN.IS", "ORGE.IS", "ORMA.IS", "OSMEN.IS",
+    "OSTIM.IS", "OTKAR.IS", "OTTO.IS", "OYAKC.IS", "OYYAT.IS", "OYAYO.IS", "OYLUM.IS",
+    "OZKGY.IS", "OZATD.IS", "OZGYO.IS", "OZRDN.IS", "OZSUB.IS", "OZYSR.IS", "PAMEL.IS", "PNLSN.IS", "PAGYO.IS", "PAPIL.IS",
+    "PRFFK.IS", "PRDGS.IS", "PRKME.IS", "PASEU.IS", "PSGYO.IS", "PATEK.IS", "PCILT.IS",
+    "PGSUS.IS", "PEKGY.IS", "PENGD.IS", "PENTA.IS", "PSDTC.IS", "PETKM.IS", "PKENT.IS", "PETUN.IS", "PINSU.IS", "PNSUT.IS",
+    "PKART.IS", "PLTUR.IS", "POLHO.IS", "POLTK.IS", "PRZMA.IS",
+    "QNBTR.IS", "QUAGR.IS", "QUFIN.IS", "RNPOL.IS", "RALYH.IS", "RAYSG.IS", "REEDR.IS",
+    "RYGYO.IS", "RYSAS.IS", "RODRG.IS", "ROYAL.IS", "RGYAS.IS", "RTALB.IS", "RUBNS.IS", "RUZYE.IS", "SAFKR.IS", "SANEL.IS",
+    "SNICA.IS", "SANFM.IS", "SANKO.IS", "SAMAT.IS", "SARKY.IS", "SARTN.IS", "SASA.IS", "SAYAS.IS", "SDTTR.IS", "SEGMN.IS",
+    "SEKUR.IS", "SELEC.IS", "SELGD.IS", "SELVA.IS", "SNKRN.IS", "SRNT.IS", "SRVGY.IS", "SEYKM.IS", "SILVR.IS", "SNGYO.IS",
+    "SKYLP.IS", "SMRTG.IS", "SMART.IS", "SODSN.IS", "SOKE.IS", "SKTAS.IS", "SONME.IS", "SNPAM.IS", "SUMAS.IS", "SUNTK.IS",
+    "SURGY.IS", "SUWEN.IS", "SMRFA.IS", "SMRVA.IS", "SEKFK.IS", "SEGYO.IS", "SKYMD.IS", "SEK.IS",
+    "SKBNK.IS", "SOKM.IS", "TABGD.IS",  "TNZTP.IS", "TARKM.IS", "TATGD.IS", "TATEN.IS",
+    "TAVHL.IS", "DRPHN.IS", "TEBFA.IS", "TEKTU.IS", "TKFEN.IS", "TKNSA.IS", "TMPOL.IS", "TRFFA.IS", "DAGHL.IS",
+    "TERA.IS", "TEHOL.IS", "TGSAS.IS",  "TOASO.IS",
+    "TRGYO.IS", "TLMAN.IS", "TSPOR.IS", "TDGYO.IS", "TRMEN.IS", "TSGYO.IS", "TUCLK.IS", "TUKAS.IS", "TRCAS.IS",
+    "TUREX.IS", "MARBL.IS", "TRKFN.IS", "TRILC.IS", "TCELL.IS", "TMSN.IS", "TUPRS.IS",
+    "THYAO.IS", "PRKAB.IS", "TTKOM.IS", "TTRAK.IS", "TBORG.IS", "TURGG.IS", "GARAN.IS", "HALKB.IS",
+    "EXIMB.IS", "ISCTR.IS", "ISKUR.IS", "KLNMA.IS", "TSKB.IS",
+    "TURSG.IS", "SISE.IS", "VAKBN.IS", "UFUK.IS", "ULAS.IS", "ULUFA.IS", "ULUSE.IS", "ULUUN.IS",
+    "UMPAS.IS", "USAK.IS", "ULKER.IS", "UNLU.IS", "VAKFN.IS", "VKGYO.IS", "VKFYO.IS", "VAKKO.IS",
+    "VANGD.IS", "VBTYZ.IS",  "VRGYO.IS", "VERUS.IS", "VERTU.IS", "VESBE.IS", "VESTL.IS", "VKING.IS",
+    "VSNMD.IS",  "YKBNK.IS", "YAPRK.IS", "YATAS.IS",
+    "YFMEN.IS", "YATVK.IS", "YYLGD.IS", "YAYLA.IS", "YGGYO.IS", "YEOTK.IS", "YGYO.IS", "YYAPI.IS", "YESIL.IS",
+    "YBTAS.IS", "YIGIT.IS", "YONGA.IS", "YKSLN.IS", "YUNSA.IS", "ZEDUR.IS", "ZRGYO.IS", "ZKBVK.IS", "ZKBVR.IS", "ZOREN.IS",
+    "BINHO.IS"
 ]
+   
 
 # Test modu için farklı sembol seçimi
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
@@ -194,18 +261,22 @@ def is_market_hours() -> bool:
 # -------------------- COOLDOWN YÖNETIMİ --------------------
 async def is_in_cooldown(symbol: str) -> bool:
     lookback = dt.datetime.utcnow() - dt.timedelta(hours=CONFIG.signal_cooldown_h)
+    
+    # Not: Büyük dosyalarda performans sorununu önlemek için
+    # sadece son birkaç satırı okumak daha verimli olabilir.
     recent_signals = _safe_read_jsonl(SIGNALS_LOG_PATH)[-1000:]
 
     for rec in reversed(recent_signals):
+        if rec.get("symbol") != symbol:
+            continue
         try:
-            if rec.get("symbol") != symbol:
-                continue
             ts = dt.datetime.fromisoformat(rec["ts"])
             if ts >= lookback:
                 return True
+            # Tarih eski ise döngüden çık
             if ts < lookback:
                 break
-        except Exception:
+        except (ValueError, KeyError):
             continue
     return False
 
@@ -221,39 +292,36 @@ async def mark_signal_sent(symbol: str, entry: float, score: float, rsi: float, 
     }
     _append_jsonl(SIGNALS_LOG_PATH, rec)
 
-# -------------------- VERİ KAYNAĞI (Investing.com benzeri) --------------------
+# -------------------- VERİ KAYNAĞI --------------------
 class BistDataClient:
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
 
     async def _fetch_with_fallback(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
         """Fallback veri kaynakları ile veri çekme"""
-        # İlk olarak Yahoo Finance dene
+        # 1. Öncelik: Yahoo Finance
         try:
             return await self._fetch_yahoo(symbol, timeframe)
         except Exception as e:
             logger.debug(f"Yahoo Finance başarısız {symbol}: {e}")
 
-        # Alternatif kaynaklar burada eklenebilir
-        # Şimdilik basit mock data döndür
+        # 2. Öncelik: Yeni kaynak (Investing.com, Mynet vb.)
+        # Buraya Investing veya Mynet veri çekme fonksiyonunuzu ekleyebilirsiniz.
+        # Örneğin:
+        # try:
+        #     return await self._fetch_investing(symbol, timeframe)
+        # except Exception as e:
+        #     logger.debug(f"Investing.com başarısız {symbol}: {e}")
+
+        # 3. Son Çare: Mock data
         return self._generate_mock_data(symbol)
 
     async def _fetch_yahoo(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
         """Yahoo Finance'den veri çek"""
         await RATE_LIMITER.acquire()
-
         yf_symbol = f"{symbol}.IS"
-
-        # Timeframe dönüştürme
-        interval_map = {
-            "15m": "15m",
-            "1h": "1h",
-            "4h": "1h",  # 4h için 1h kullan
-            "1d": "1d"
-        }
+        interval_map = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
         interval = interval_map.get(timeframe, "1h")
-        period = "3mo" if timeframe == "1d" else "1mo"
-
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
         params = {
             "interval": interval,
@@ -261,55 +329,37 @@ class BistDataClient:
             "period2": int(dt.datetime.now().timestamp()),
             "includePrePost": "false"
         }
-
         try:
             async with self.session.get(url, params=params, timeout=CONFIG.http_timeout) as response:
                 if response.status != 200:
-                    raise Exception(f"HTTP {response.status}")
-
+                    raise ValueError(f"HTTP {response.status}")
                 data = await response.json()
                 result = data.get("chart", {}).get("result", [])
-
                 if not result:
-                    raise Exception("Boş sonuç")
-
+                    raise ValueError("Boş sonuç")
                 quote = result[0]
                 timestamps = quote.get("timestamp", [])
                 indicators = quote.get("indicators", {})
                 quote_data = indicators.get("quote", [{}])[0]
-
                 if not timestamps or not quote_data:
-                    raise Exception("Veri eksik")
-
-                # Son değerleri al
+                    raise ValueError("Veri eksik")
                 closes = quote_data.get("close", [])
                 volumes = quote_data.get("volume", [])
                 highs = quote_data.get("high", [])
                 lows = quote_data.get("low", [])
                 opens = quote_data.get("open", [])
-
                 if not closes or len(closes) < 50:
-                    raise Exception("Yetersiz veri")
-
-                # DataFrame oluştur
+                    raise ValueError("Yetersiz veri")
                 df_data = {
-                    "timestamp": timestamps[-100:],
-                    "open": opens[-100:],
-                    "high": highs[-100:],
-                    "low": lows[-100:],
-                    "close": closes[-100:],
-                    "volume": volumes[-100:]
+                    "timestamp": timestamps[-100:], "open": opens[-100:],
+                    "high": highs[-100:], "low": lows[-100:],
+                    "close": closes[-100:], "volume": volumes[-100:]
                 }
-
                 df = pd.DataFrame(df_data)
                 df = df.dropna()
-
                 if len(df) < 20:
-                    raise Exception("Temizleme sonrası yetersiz veri")
-
-                # Teknik göstergeleri hesapla
+                    raise ValueError("Temizleme sonrası yetersiz veri")
                 df = self._calculate_indicators(df)
-
                 return {
                     "df": df,
                     "current": {
@@ -320,23 +370,38 @@ class BistDataClient:
                         "ema55": float(df["ema55"].iloc[-1])
                     }
                 }
+        except aiohttp.ClientError as e:
+            raise RuntimeError(f"Aiohttp veri hatası: {e}")
+        except (ValueError, KeyError) as e:
+            raise ValueError(f"Yahoo Finance veri formatı hatası: {e}")
 
-        except Exception as e:
-            raise Exception(f"Yahoo Finance veri hatası: {e}")
+    async def _fetch_investing(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+        """
+        Investing.com gibi bir kaynaktan veri çekmek için tasarlanmış şablon.
+        Bu fonksiyon, Investing.com'un halka açık API'si olmadığı için doğrudan çalışmaz.
+        Bu alana, ücretli bir API veya web kazıma kodunuzu ekleyebilirsiniz.
+        """
+        logger.info(f"Investing için veri çekme denemesi: {symbol}, {timeframe}")
+        # Buraya gerçek veri çekme kodunuzu ekleyin. Örneğin:
+        # await RATE_LIMITER.acquire()
+        # url = "..."
+        # params = {"symbol": symbol, ...}
+        # async with self.session.get(url, params=params) as response:
+        #    ...
+        #    df = ... # DataFrame'i oluşturun
+        #    df = self._calculate_indicators(df)
+        #    return {"df": df, "current": ...}
+        raise NotImplementedError("Investing.com/Mynet için veri çekme metodu uygulanmadı.")
 
     def _generate_mock_data(self, symbol: str) -> Dict[str, Any]:
         """Basit mock data oluştur"""
         np.random.seed(abs(hash(symbol)) % 2**32)
-
         base_price = np.random.uniform(5, 50)
         dates = pd.date_range(end=dt.datetime.now(), periods=100, freq='1H')
-
-        # Random walk fiyat oluştur
         returns = np.random.normal(0, 0.02, 100)
         prices = [base_price]
         for ret in returns[1:]:
             prices.append(prices[-1] * (1 + ret))
-
         df = pd.DataFrame({
             "timestamp": [d.timestamp() for d in dates],
             "open": prices,
@@ -345,9 +410,7 @@ class BistDataClient:
             "close": prices,
             "volume": np.random.uniform(100000, 1000000, 100)
         })
-
         df = self._calculate_indicators(df)
-
         return {
             "df": df,
             "current": {
@@ -361,23 +424,17 @@ class BistDataClient:
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Teknik göstergeleri hesapla"""
-        # RSI hesapla
         delta = df["close"].diff()
         gain = delta.where(delta > 0, 0.0)
         loss = (-delta).where(delta < 0, 0.0)
-
         avg_gain = gain.rolling(window=14).mean()
         avg_loss = loss.rolling(window=14).mean()
-
         rs = avg_gain / avg_loss.replace(0, 1e-10)
         df["rsi"] = 100 - (100 / (1 + rs))
         df["rsi"] = df["rsi"].fillna(50)
-
-        # EMA hesapla
         df["ema13"] = df["close"].ewm(span=13).mean()
         df["ema55"] = df["close"].ewm(span=55).mean()
         df["ema233"] = df["close"].ewm(span=min(233, max(3, len(df)//2))).mean()
-
         return df
 
 # -------------------- SİNYAL ANALİZİ --------------------
@@ -389,39 +446,24 @@ class BistSignalAnalyzer:
         """Sembol analizi"""
         if not timeframe_data:
             return None
-
-        # Ana timeframe seç
         main_tf = "1h" if "1h" in timeframe_data else list(timeframe_data.keys())[0]
         main_data = timeframe_data[main_tf]
-
         current = main_data["current"]
         df = main_data["df"]
-
-        # Temel filtreler
         if current["price"] < self.config.min_price:
             return None
-
         volume_try = current["price"] * current["volume"]
         if volume_try < self.config.min_volume_try:
             return None
-
-        # Sinyal hesapla
         signals = self._calculate_signals(df, current)
         total_score = self._calculate_total_score(signals)
-
         if total_score < self.config.min_signal_score:
             return None
-
-        # Sinyal yönünü belirle
         direction = self._determine_direction(current, signals)
-
         if direction == "NEUTRAL":
             return None
-
-        # Multi-timeframe tutarlılık kontrolü
         if not self._check_timeframe_consistency(timeframe_data, direction):
             return None
-
         return {
             "symbol": symbol,
             "direction": direction,
@@ -444,8 +486,6 @@ class BistSignalAnalyzer:
             "trend_acceleration": 0.0,
             "volume_confirmation": 0.0
         }
-
-        # RSI momentum
         rsi = current["rsi"]
         if rsi < 50:
             signals["rsi_momentum"] = 1.0
@@ -453,53 +493,50 @@ class BistSignalAnalyzer:
                 signals["rsi_momentum"] = 1.5
             if rsi < 30:
                 signals["rsi_momentum"] = 2.0
-
-        # EMA hiyerarşisi
         price = current["price"]
         ema13 = current["ema13"]
         ema55 = current["ema55"]
-
         if price > ema13 > ema55:
             signals["ema_hierarchy"] = 2.0
         elif price > ema13:
             signals["ema_hierarchy"] = 1.0
         elif price < ema13 < ema55:
             signals["ema_hierarchy"] = -1.0
-
-        # Fiyat kırılımı
         try:
             distance_to_ema = abs(price - ema13) / ema13 * 100
             if distance_to_ema < 1.0:
                 signals["price_breakout"] = 1.5
             elif distance_to_ema < 2.0:
                 signals["price_breakout"] = 1.0
-        except Exception:
+        except (ZeroDivisionError, KeyError):
             pass
-
-        # Trend hızlanması
         if len(df) >= 5:
             recent_ema13 = df["ema13"].iloc[-5:].diff().mean()
             if recent_ema13 > 0:
                 signals["trend_acceleration"] = 1.0
-
-        # Hacim onayı
-        if len(df) >= 10:
-            avg_volume = df["volume"].iloc[-10:].mean()
+        if len(df) >= 20:
+            avg_volume = df["volume"].iloc[-20:].mean()
             if current["volume"] > avg_volume * 1.5:
                 signals["volume_confirmation"] = 1.0
-
         return signals
 
     def _calculate_total_score(self, signals: Dict[str, float]) -> float:
         """Toplam skor hesapla"""
-        total = (
+        weighted_sum = (
             signals.get("rsi_momentum", 0) * self.config.weight_rsi +
             signals.get("ema_hierarchy", 0) * self.config.weight_ema +
             signals.get("price_breakout", 0) * self.config.weight_breakout +
             signals.get("trend_acceleration", 0) * self.config.weight_momentum +
-            signals.get("volume_confirmation", 0) * 0.5
+            signals.get("volume_confirmation", 0) * self.config.weight_volume
         )
-        return total / 5
+        total_weights = (
+            self.config.weight_rsi + self.config.weight_ema +
+            self.config.weight_breakout + self.config.weight_momentum +
+            self.config.weight_volume
+        )
+        if total_weights == 0:
+            return 0
+        return weighted_sum / total_weights
 
     def _determine_direction(self, current: Dict[str, Any], signals: Dict[str, float]) -> str:
         """Sinyal yönünü belirle"""
@@ -507,35 +544,26 @@ class BistSignalAnalyzer:
         ema13 = current["ema13"]
         ema55 = current["ema55"]
         rsi = current["rsi"]
-
-        # Bullish koşullar
         if (price > ema13 > ema55 and
             rsi > 25 and rsi < 70 and
             signals.get("ema_hierarchy", 0) > 0):
             return "BUY"
-
-        # Bearish koşullar
         if (price < ema13 < ema55 and
             rsi < 75 and rsi > 30 and
             signals.get("ema_hierarchy", 0) < 0):
             return "SELL"
-
         return "NEUTRAL"
 
     def _check_timeframe_consistency(self, timeframe_data: Dict[str, Dict[str, Any]], main_direction: str) -> bool:
         """Multi-timeframe tutarlılık kontrolü"""
         if len(timeframe_data) <= 1:
             return True
-
         consistent_count = 0
         for tf, data in timeframe_data.items():
             signals = self._calculate_signals(data["df"], data["current"])
             tf_direction = self._determine_direction(data["current"], signals)
-
             if tf_direction == main_direction:
                 consistent_count += 1
-
-        # En az yarısı tutarlı olmalı
         return consistent_count >= max(1, len(timeframe_data) // 2)
 
 # -------------------- TELEGRAM --------------------
@@ -560,58 +588,53 @@ class BistTelegramNotifier:
                     logger.warning(f"Telegram hata {resp.status}: {body}")
                 else:
                     logger.info("Telegram mesajı gönderildi")
+        except aiohttp.ClientError as e:
+            logger.error(f"Telegram gönderim hatası (Aiohttp): {e}")
         except Exception as e:
             logger.error(f"Telegram gönderim hatası: {e}")
 
     async def send_chart(self, symbol: str, df: pd.DataFrame, signal_info: Dict[str, Any]):
         """Grafik oluşturup Telegram'a gönder"""
         try:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-
-            # Fiyat grafiği
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1]})
             recent_data = df.tail(50)
             dates = list(range(len(recent_data)))
-
-            ax1.plot(dates, recent_data["close"], label="Fiyat")
-            ax1.plot(dates, recent_data["ema13"], label="EMA13")
-            ax1.plot(dates, recent_data["ema55"], label="EMA55")
-
+            ax1.plot(dates, recent_data["close"], label="Fiyat", color='dodgerblue')
+            ax1.plot(dates, recent_data["ema13"], label="EMA13", color='orange', linestyle='--')
+            ax1.plot(dates, recent_data["ema55"], label="EMA55", color='red', linestyle='--')
+            if len(recent_data) > 2:
+                for i in range(1, len(recent_data)):
+                    if (recent_data['ema13'].iloc[i-1] < recent_data['ema55'].iloc[i-1] and recent_data['ema13'].iloc[i] > recent_data['ema55'].iloc[i]):
+                        ax1.axvline(x=dates[i], color='green', linestyle=':', linewidth=2, label='Golden Cross')
+                    elif (recent_data['ema13'].iloc[i-1] > recent_data['ema55'].iloc[i-1] and recent_data['ema13'].iloc[i] < recent_data['ema55'].iloc[i]):
+                        ax1.axvline(x=dates[i], color='purple', linestyle=':', linewidth=2, label='Death Cross')
             ax1.set_title(f"{symbol} - {signal_info['direction']} Sinyali", fontsize=14, fontweight='bold')
             ax1.legend()
             ax1.grid(True, alpha=0.3)
-
-            # RSI grafiği
-            ax2.plot(dates, recent_data["rsi"], label="RSI")
-            ax2.axhline(70, linestyle='--', alpha=0.5)
-            ax2.axhline(30, linestyle='--', alpha=0.5)
-            ax2.axhline(50, linestyle='-', alpha=0.3)
-
+            ax2.plot(dates, recent_data["rsi"], label="RSI", color='green')
+            ax2.axhline(70, linestyle='--', color='red', alpha=0.5, label='Aşırı Alım')
+            ax2.axhline(30, linestyle='--', color='green', alpha=0.5, label='Aşırı Satım')
+            ax2.axhline(50, linestyle='-', color='gray', alpha=0.3)
             ax2.set_ylim(0, 100)
             ax2.set_title(f"RSI: {signal_info['rsi']:.1f}", fontsize=12)
             ax2.legend()
             ax2.grid(True, alpha=0.3)
-
             plt.tight_layout()
-
-            # Grafiği kaydet
             buf = io.BytesIO()
             plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
             plt.close()
             buf.seek(0)
-
-            # Telegram'a gönder
             url = f"{self.base}/sendPhoto"
             form = aiohttp.FormData()
             form.add_field('chat_id', self.chat_id)
             form.add_field('photo', buf, filename=f'{symbol}.png', content_type='image/png')
-
             async with self.session.post(url, data=form, timeout=CONFIG.http_timeout) as response:
                 if response.status != 200:
                     body = await response.text()
                     logger.error(f"Grafik gönderme hatası: {response.status} {body}")
-
             buf.close()
-
+        except aiohttp.ClientError as e:
+            logger.error(f"Grafik gönderme hatası (Aiohttp): {e}")
         except Exception as e:
             logger.error(f"Grafik oluşturma hatası: {e}")
 
@@ -625,8 +648,6 @@ async def send_signal_notification(telegram: BistTelegramNotifier, signal_info: 
         score = signal_info["score"]
         price = signal_info["price"]
         rsi = signal_info["rsi"]
-
-        # HTML formatlı mesaj
         msg_lines = [
             f"📣 <b>{symbol}</b> — <b>{dir_}</b>",
             f"Skor: <b>{score}</b>",
@@ -638,23 +659,15 @@ async def send_signal_notification(telegram: BistTelegramNotifier, signal_info: 
         ]
         for tf, sc in signal_info.get("timeframe_scores", {}).items():
             msg_lines.append(f"- {tf}: {sc:.2f}")
-
-        # Eklenecek küçük sinyal detayları
         msg_lines.append("")
         msg_lines.append("<b>Sinyal bileşenleri:</b>")
         for k, v in signal_info.get("signals", {}).items():
             msg_lines.append(f"- {k}: {v}")
-
         message = "\n".join(msg_lines)
-
-        # Gönder
         await telegram.send_message(message)
-
-        # Grafik gönder (ana timeframe df)
         main_tf = "1h" if "1h" in timeframe_data else next(iter(timeframe_data))
         main_df = timeframe_data[main_tf]["df"]
         await telegram.send_chart(symbol, main_df, signal_info)
-
     except Exception as e:
         logger.exception(f"Sinyal bildirimi gönderilemedi: {e}")
 
@@ -670,9 +683,7 @@ async def send_scan_summary(telegram: BistTelegramNotifier, results: List[Dict[s
         ]
         for r in results[:top_n]:
             lines.append(f"{r['symbol']} — {r['direction']} — Skor: {r['score']:.2f} — Fiyat: {r['price']:.2f} TRY — RSI: {r['rsi']:.1f}")
-
         await telegram.send_message("\n".join(lines))
-
     except Exception as e:
         logger.exception(f"Özet gönderilemedi: {e}")
 
@@ -681,47 +692,33 @@ async def scan_symbols(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
     """Ana tarama fonksiyonu"""
     start_time = time.time()
     logger.info(f"🔍 BIST taraması başlıyor: {len(SELECTED_SYMBOLS)} sembol")
-
     data_client = BistDataClient(session)
     analyzer = BistSignalAnalyzer(CONFIG)
-
     telegram = None
     if CONFIG.telegram_token and CONFIG.telegram_chat_id:
         telegram = BistTelegramNotifier(CONFIG.telegram_token, CONFIG.telegram_chat_id, session)
-
     results = []
     semaphore = asyncio.Semaphore(CONFIG.concurrency)
-
     async def analyze_single_symbol(symbol: str) -> Optional[Dict[str, Any]]:
         async with semaphore:
             try:
-                # Cooldown kontrolü
                 if await is_in_cooldown(symbol):
                     return None
-
-                # Multi-timeframe veri çek
                 timeframe_data = {}
                 for tf in CONFIG.timeframes:
                     try:
                         data = await data_client._fetch_with_fallback(symbol, tf)
                         if data:
                             timeframe_data[tf] = data
-                        await asyncio.sleep(0.05)  # Rate limiting small sleep
-                    except Exception as e:
+                    except (ValueError, RuntimeError, KeyError) as e:
                         logger.debug(f"{symbol} {tf} veri hatası: {e}")
-
+                        continue
                 if not timeframe_data:
                     return None
-
-                # Analiz yap
                 signal_info = analyzer.analyze_symbol(symbol, timeframe_data)
-
                 if signal_info:
-                    # Telegram bildirimi gönder
                     if telegram:
                         await send_signal_notification(telegram, signal_info, timeframe_data)
-
-                    # Sinyali kaydet
                     await mark_signal_sent(
                         signal_info["symbol"],
                         signal_info["price"],
@@ -729,34 +726,22 @@ async def scan_symbols(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
                         signal_info["rsi"],
                         signal_info["direction"]
                     )
-
-                    logger.info(f"✅ {signal_info['direction']} SİNYAL: {symbol} - Skor: {signal_info['score']}")
+                    logger.info(f"✅ {signal_info['direction']} SİNYAL: {symbol} - Skor: {signal_info['score']:.2f}")
                     return signal_info
-
                 return None
-
             except Exception as e:
                 logger.warning(f"{symbol} analiz hatası: {e}")
                 return None
-
-    # Tüm sembolleri paralel olarak analiz et
     tasks = [analyze_single_symbol(symbol) for symbol in SELECTED_SYMBOLS[:CONFIG.max_symbols]]
     completed = await asyncio.gather(*tasks, return_exceptions=True)
-
     for result in completed:
         if isinstance(result, dict):
             results.append(result)
-
-    # Sonuçları skorlara göre sırala
     results.sort(key=lambda x: x["score"], reverse=True)
-
     elapsed = time.time() - start_time
     logger.info(f"✅ Tarama tamamlandı: {elapsed:.1f}s - {len(results)} sinyal bulundu")
-
-    # Özet gönder
     if telegram and results:
         await send_scan_summary(telegram, results, elapsed)
-
     return results
 
 # -------------------- HTTP SAĞLIK KONTROLÜ --------------------
@@ -767,7 +752,7 @@ async def health_handler(request):
 running = True
 
 # -------------------- SIGNAL HANDLER --------------------
-def _signal_handler(sig):
+def _signal_handler(sig, frame):
     global running
     logger.info(f"Signal received: {sig}. Shutting down...")
     running = False
@@ -776,7 +761,7 @@ def _signal_handler(sig):
 async def periodic_runner(app):
     """Periyodik tarayıcı; arka planda çalışır."""
     session: aiohttp.ClientSession = app["session"]
-    interval_sec = int(os.getenv("SCAN_INTERVAL_SEC", "900"))  # default 15 min
+    interval_sec = int(os.getenv("SCAN_INTERVAL_SEC", "900"))
     while running:
         try:
             if is_market_hours() or TEST_MODE:
@@ -785,13 +770,10 @@ async def periodic_runner(app):
                 logger.debug("Market kapalı; tarama atlandı.")
         except Exception as e:
             logger.exception(f"Periyodik tarama hatası: {e}")
-
-        # bekle
         for _ in range(max(1, interval_sec // 1)):
             if not running:
                 break
             await asyncio.sleep(1)
-
     logger.info("Periodic runner stopped.")
 
 # -------------------- BACKGROUND TASKS --------------------
@@ -820,25 +802,20 @@ async def init_app():
 
 # -------------------- MAIN ENTRY --------------------
 async def main():
-    # Signal handler'lar
     loop = asyncio.get_running_loop()
     for s in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(s, lambda s=s: _signal_handler(s))
-        except NotImplementedError:
-            pass  # Windows fallback
-
+            loop.add_signal_handler(s, _signal_handler, s, None)
+        except (NotImplementedError, ValueError):
+            pass
     app = await init_app()
     runner = web.AppRunner(app)
     await runner.setup()
-
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8080"))
     site = web.TCPSite(runner, host=host, port=port)
-
     logger.info(f"Başlatılıyor — host={host} port={port} TEST_MODE={TEST_MODE}")
     await site.start()
-
     try:
         while running:
             await asyncio.sleep(1)
