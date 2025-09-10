@@ -478,9 +478,9 @@ async def fetch_and_analyze_data(session: aiohttp.ClientSession, symbol: str, ti
 
         # Sinyal belirleme - Basitleştirilmiş mantık
         direction = None
-        if rsi < 45 and price > ema:
+        if rsi < 55 and price > ema:
             direction = "BULLISH"
-        elif rsi > 55 and price < ema:
+        elif rsi > 75 and price < ema:
             direction = "BEARISH"
 
         if not direction:
