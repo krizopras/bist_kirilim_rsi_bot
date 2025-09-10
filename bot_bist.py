@@ -763,14 +763,16 @@ async def scan_symbols(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
 async def health_handler(request):
     return web.Response(text="OK")
 
-# -------------------- RUNNER & GRACEFUL SHUTDOWN --------------------
+# -------------------- GLOBAL FLAGS --------------------
 running = True
 
+# -------------------- SIGNAL HANDLER --------------------
 def _signal_handler(sig):
     global running
     logger.info(f"Signal received: {sig}. Shutting down...")
     running = False
 
+# -------------------- PERIODIC TASK --------------------
 async def periodic_runner(app):
     """Periyodik tarayıcı; arka planda çalışır."""
     session: aiohttp.ClientSession = app["session"]
@@ -783,13 +785,16 @@ async def periodic_runner(app):
                 logger.debug("Market kapalı; tarama atlandı.")
         except Exception as e:
             logger.exception(f"Periyodik tarama hatası: {e}")
+
         # bekle
         for _ in range(max(1, interval_sec // 1)):
             if not running:
                 break
             await asyncio.sleep(1)
+
     logger.info("Periodic runner stopped.")
 
+# -------------------- BACKGROUND TASKS --------------------
 async def start_background_tasks(app):
     app["bg_task"] = asyncio.create_task(periodic_runner(app))
 
@@ -802,42 +807,49 @@ async def cleanup_background_tasks(app):
         except asyncio.CancelledError:
             pass
 
+# -------------------- APP INITIALIZATION --------------------
 async def init_app():
     app = web.Application()
     app.add_routes([web.get("/health", health_handler)])
     timeout = aiohttp.ClientTimeout(total=CONFIG.http_timeout)
     session = aiohttp.ClientSession(timeout=timeout)
     app["session"] = session
-    app.on_startup.append(lambda a: start_background_tasks(a))
-    app.on_cleanup.append(lambda a: cleanup_background_tasks(a))
+    app.on_startup.append(start_background_tasks)
+    app.on_cleanup.append(cleanup_background_tasks)
     return app
 
-def main():
-    try:
+# -------------------- MAIN ENTRY --------------------
+async def main():
+    # Signal handler'lar
     loop = asyncio.get_running_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    for s in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(s, lambda s=s: _signal_handler(s))
+        except NotImplementedError:
+            pass  # Windows fallback
 
-for s in (signal.SIGINT, signal.SIGTERM):
+    app = await init_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, host=host, port=port)
+
+    logger.info(f"Başlatılıyor — host={host} port={port} TEST_MODE={TEST_MODE}")
+    await site.start()
+
     try:
-        loop.add_signal_handler(s, lambda s=s: _signal_handler(s))
-    except NotImplementedError:
-        # Windows fallback if required
+        while running:
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
         pass
+    finally:
+        logger.info("Kapatılıyor...")
+        await runner.cleanup()
+        await app["session"].close()
+        logger.info("Çıkış tamamlandı.")
 
-app = loop.run_until_complete(init_app())
-host = os.getenv("HOST", "0.0.0.0")
-port = int(os.getenv("PORT", "8080"))
-
-logger.info(f"Başlatılıyor — host={host} port={port} TEST_MODE={TEST_MODE}")
-try:
-    web.run_app(app, host=host, port=port)
-except (KeyboardInterrupt, SystemExit):
-    logger.info("Kapatılıyor...")
-finally:
-    loop.run_until_complete(app["session"].close())
-    logger.info("Çıkış tamamlandı.")
-
+# -------------------- PROGRAM START --------------------
 if __name__ == "__main__":
     asyncio.run(main())
