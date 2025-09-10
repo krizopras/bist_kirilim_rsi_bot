@@ -89,13 +89,13 @@ class BistBotConfig:
     min_volume_try: float = 1_000_000
     max_symbols: int = 100
 
-    min_signal_score: float = 2.5
-    weight_rsi: float = 2.0
-    weight_ema: float = 2.5
-    weight_momentum: float = 2.0
-    weight_breakout: float = 3.0
-    weight_volume: float = 1.0  # Yeni ağırlık
-
+    min_signal_score: float = 3.0       # Sinyal puanını biraz artırabiliriz
+    weight_ema: float = 0.0             # Bunu artık filtre olarak kullanıyoruz
+    weight_volume: float = 4.0          # Hacim çok önemli
+    weight_breakout: float = 3.5        # Fiyat kırılımı da çok önemli
+    weight_rsi: float = 2.0             # RSI standart bir destekleyici sinyal
+    weight_momentum: float = 1.5        # Trendin hızlanması için daha düşük bir ağırlık
+    
     timeframes: Tuple[str, ...] = ("1h", "4h", "1d")
     http_timeout: int = 15
     rate_limit_per_min: int = 600
