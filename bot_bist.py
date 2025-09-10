@@ -465,15 +465,24 @@ class BistSignalAnalyzer:
         volume_try = current["price"] * current["volume"]
         if volume_try < self.config.min_volume_try:
             return None
-        signals = self._calculate_signals(df, current)
-        total_score = self._calculate_total_score(signals)
-        if total_score < self.config.min_signal_score:
-            return None
-        direction = self._determine_direction(current, signals)
+        
+        # Sinyal yönünü belirlemek için ana filtreyi çalıştır
+        direction = self._determine_direction(current)
         if direction == "NEUTRAL":
             return None
+
+        # Sadece ana filtreyi geçen hisseler için detaylı sinyalleri hesapla
+        signals = self._calculate_signals(df, current, direction)
+        total_score = self._calculate_total_score(signals)
+        
+        # Puan kontrolü
+        if total_score < self.config.min_signal_score:
+            return None
+
+        # Multi-timeframe tutarlılık kontrolü
         if not self._check_timeframe_consistency(timeframe_data, direction):
             return None
+        
         return {
             "symbol": symbol,
             "direction": direction,
@@ -483,36 +492,33 @@ class BistSignalAnalyzer:
             "volume_try": volume_try,
             "signals": signals,
             "timeframe_scores": {tf: self._calculate_total_score(
-                self._calculate_signals(data["df"], data["current"])
+                self._calculate_signals(data["df"], data["current"], direction)
             ) for tf, data in timeframe_data.items()}
         }
 
-    def _calculate_signals(self, df: pd.DataFrame, current: Dict[str, Any]) -> Dict[str, float]:
+    def _calculate_signals(self, df: pd.DataFrame, current: Dict[str, Any], direction: str) -> Dict[str, float]:
         """Sinyal skorları hesapla"""
         signals = {
             "rsi_momentum": 0.0,
-            "ema_hierarchy": 0.0,
             "price_breakout": 0.0,
             "trend_acceleration": 0.0,
             "volume_confirmation": 0.0
         }
-        rsi = current["rsi"]
-        if rsi < 50:
-            signals["rsi_momentum"] = 1.0
-            if rsi < 40:
-                signals["rsi_momentum"] = 1.5
-            if rsi < 30:
-                signals["rsi_momentum"] = 2.0
-        price = current["price"]
-        ema13 = current["ema13"]
-        ema55 = current["ema55"]
-        if price > ema13 > ema55:
-            signals["ema_hierarchy"] = 2.0
-        elif price > ema13:
-            signals["ema_hierarchy"] = 1.0
-        elif price < ema13 < ema55:
-            signals["ema_hierarchy"] = -1.0
+
+        # Sadece BUY sinyali için RSI momentumunu hesapla
+        if direction == "BUY":
+            rsi = current["rsi"]
+            if rsi < 50:
+                signals["rsi_momentum"] = 1.0
+                if rsi < 40:
+                    signals["rsi_momentum"] = 1.5
+                if rsi < 30:
+                    signals["rsi_momentum"] = 2.0
+
+        # Fiyat Kırılımı Sinyali
         try:
+            price = current["price"]
+            ema13 = current["ema13"]
             distance_to_ema = abs(price - ema13) / ema13 * 100
             if distance_to_ema < 1.0:
                 signals["price_breakout"] = 1.5
@@ -520,48 +526,48 @@ class BistSignalAnalyzer:
                 signals["price_breakout"] = 1.0
         except (ZeroDivisionError, KeyError):
             pass
+
+        # Trend Hızlanması Sinyali
         if len(df) >= 5:
             recent_ema13 = df["ema13"].iloc[-5:].diff().mean()
             if recent_ema13 > 0:
                 signals["trend_acceleration"] = 1.0
+
+        # Hacim Onayı Sinyali
         if len(df) >= 20:
             avg_volume = df["volume"].iloc[-20:].mean()
             if current["volume"] > avg_volume * 1.5:
                 signals["volume_confirmation"] = 1.0
+        
         return signals
 
     def _calculate_total_score(self, signals: Dict[str, float]) -> float:
         """Toplam skor hesapla"""
         weighted_sum = (
             signals.get("rsi_momentum", 0) * self.config.weight_rsi +
-            signals.get("ema_hierarchy", 0) * self.config.weight_ema +
             signals.get("price_breakout", 0) * self.config.weight_breakout +
             signals.get("trend_acceleration", 0) * self.config.weight_momentum +
             signals.get("volume_confirmation", 0) * self.config.weight_volume
         )
         total_weights = (
-            self.config.weight_rsi + self.config.weight_ema +
-            self.config.weight_breakout + self.config.weight_momentum +
-            self.config.weight_volume
+            self.config.weight_rsi + self.config.weight_breakout +
+            self.config.weight_momentum + self.config.weight_volume
         )
         if total_weights == 0:
             return 0
         return weighted_sum / total_weights
 
-    def _determine_direction(self, current: Dict[str, Any], signals: Dict[str, float]) -> str:
-        """Sinyal yönünü belirle"""
+    def _determine_direction(self, current: Dict[str, Any]) -> str:
+        """Sinyal yönünü belirle (ana filtre)"""
         price = current["price"]
         ema13 = current["ema13"]
         ema55 = current["ema55"]
-        rsi = current["rsi"]
-        if (price > ema13 > ema55 and
-            rsi > 25 and rsi < 70 and
-            signals.get("ema_hierarchy", 0) > 0):
+        
+        if price > ema13 > ema55:
             return "BUY"
-        if (price < ema13 < ema55 and
-            rsi < 75 and rsi > 30 and
-            signals.get("ema_hierarchy", 0) < 0):
+        if price < ema13 < ema55:
             return "SELL"
+            
         return "NEUTRAL"
 
     def _check_timeframe_consistency(self, timeframe_data: Dict[str, Dict[str, Any]], main_direction: str) -> bool:
@@ -570,12 +576,11 @@ class BistSignalAnalyzer:
             return True
         consistent_count = 0
         for tf, data in timeframe_data.items():
-            signals = self._calculate_signals(data["df"], data["current"])
-            tf_direction = self._determine_direction(data["current"], signals)
+            # Yeni mantığa göre sadece yön kontrolü yap
+            tf_direction = self._determine_direction(data["current"])
             if tf_direction == main_direction:
                 consistent_count += 1
         return consistent_count >= max(1, len(timeframe_data) // 2)
-
 # -------------------- TELEGRAM --------------------
 class BistTelegramNotifier:
     def __init__(self, token: str, chat_id: str, session: aiohttp.ClientSession):
