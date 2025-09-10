@@ -312,20 +312,27 @@ def calculate_ema(series: pd.Series, period: int = 20) -> pd.Series:
         return series
 
 # DÜZELTME: Async fetch fonksiyonu düzeltildi
+# DÜZELTME: Async fetch fonksiyonu düzeltildi
 async def fetch_yfinance_data(symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-    """Yahoo Finance'dan veri çek"""
+    """Yahoo Finance'dan veri çek (fallback ile)"""
     yf_symbol = get_yfinance_ticker(symbol)
     yf_interval = get_yfinance_interval(timeframe)
     
     try:
         logger.debug(f"YF veri çekiliyor: {yf_symbol} ({yf_interval})")
         
-        # Sync fonksiyonu async olarak çalıştır
         def fetch_data():
             ticker = yf.Ticker(yf_symbol)
-            # Daha fazla veri al (RSI için)
-            period = "2y" if timeframe == "1d" else "1y"
-            return ticker.history(period=period, interval=yf_interval, timeout=10)
+            # Ana deneme
+            period = "6mo" if timeframe == "1d" else "1mo"
+            hist = ticker.history(period=period, interval=yf_interval, timeout=10)
+            
+            # Eğer boş dönerse fallback
+            if hist.empty:
+                logger.warning(f"Fallback aktif: {yf_symbol} için kısa period denenecek")
+                hist = ticker.history(period="1mo", interval="1d", timeout=10)
+            
+            return hist
         
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -361,6 +368,7 @@ async def fetch_yfinance_data(symbol: str, timeframe: str) -> Optional[Dict[str,
     except Exception as e:
         logger.debug(f"YF fetch hata {yf_symbol}: {str(e)[:100]}")
         return None
+
 
 def validate_data(data: Dict[str, Any], symbol: str) -> bool:
     """Veri doğrulama"""
