@@ -18,7 +18,7 @@ import asyncio
 import logging
 import signal
 import datetime as dt
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 import sys
 import locale
@@ -28,7 +28,6 @@ import pandas as pd
 import aiohttp
 from aiohttp import web
 import pytz
-import yfinance as yf
 
 # Matplotlib backend ayarı
 import matplotlib
@@ -259,10 +258,9 @@ def is_market_hours() -> bool:
 
     return CONFIG.market_open <= current_time <= CONFIG.market_close
 
-# -------------------- COOLDOWN YÖNETİMİ --------------------
+# -------------------- COOLDOWN YÖNETIMİ --------------------
 async def is_in_cooldown(symbol: str) -> bool:
-    # `utcnow()` yerine `now(timezone.utc)` kullanıldı
-    lookback = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=CONFIG.signal_cooldown_h)
+    lookback = dt.datetime.utcnow() - dt.timedelta(hours=CONFIG.signal_cooldown_h)
     
     # Not: Büyük dosyalarda performans sorununu önlemek için
     # sadece son birkaç satırı okumak daha verimli olabilir.
@@ -302,133 +300,88 @@ class BistDataClient:
 
     async def _fetch_with_fallback(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
         """Fallback veri kaynakları ile veri çekme"""
-        # 1. Öncelik: Yahoo Finance (yfinance kütüphanesi)
+        # 1. Öncelik: Yahoo Finance
         try:
-            return await self._fetch_yahoo_yfinance(symbol, timeframe)
+            return await self._fetch_yahoo(symbol, timeframe)
         except Exception as e:
             logger.debug(f"Yahoo Finance başarısız {symbol}: {e}")
 
-        # 2. Öncelik: Alpha Vantage
-        if self.av_api_key:
-            try:
-                return await self._fetch_alpha_vantage(symbol, timeframe)
-            except Exception as e:
-                logger.debug(f"Alpha Vantage başarısız {symbol}: {e}")
-
-        # 3. Son Çare: Mock data
-        logger.warning(f"{symbol} için tüm veri kaynakları başarısız oldu. Mock data oluşturuluyor.")
+        # 2. Son Çare: Mock data
         return self._generate_mock_data(symbol)
 
-    async def _fetch_yahoo_yfinance(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-        """yfinance kütüphanesi ile veri çekme"""
-        yf_symbol = symbol.replace('.IS', '') + '.IS'
-        interval_map = {"15m": "15m", "1h": "1h", "4h": "60m", "1d": "1d"}
-        interval = interval_map.get(timeframe, "1d")
-
-        try:
-            # yfinance'ı asenkron olarak çalıştırmak için executor kullanıyoruz
-            loop = asyncio.get_running_loop()
-            df = await loop.run_in_executor(
-                None,
-                yf.download,
-                yf_symbol,
-                period="90d",
-                interval=interval,
-                progress=False
-            )
-            
-            if df.empty or len(df) < 50:
-                raise ValueError("Yetersiz veya boş veri")
-
-            df.columns = [col.lower().replace(' ', '_') for col in df.columns]
-            df = df.rename(columns={'adj_close': 'close'})
-            
-            df = self._calculate_indicators(df)
-
-            return {
-                "df": df,
-                "current": {
-                    "price": float(df["close"].iloc[-1]),
-                    "volume": float(df["volume"].iloc[-1]),
-                    "rsi": float(df["rsi"].iloc[-1]),
-                    "ema13": float(df["ema13"].iloc[-1]),
-                    "ema55": float(df["ema55"].iloc[-1])
-                }
-            }
-        except (ValueError, KeyError, yf.YFinanceException) as e:
-            raise ValueError(f"yfinance veri hatası: {e}")
-
-    async def _fetch_alpha_vantage(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-        """Alpha Vantage'dan veri çekme fonksiyonu"""
-        if not self.av_api_key:
-            raise ValueError("Alpha Vantage API anahtarı ayarlanmamış.")
-
-        function = 'TIME_SERIES_DAILY_ADJUSTED'
-        interval = None
-        if timeframe in ['1h', '4h', '15m']:
-            function = 'TIME_SERIES_INTRADAY'
-            if timeframe == '4h':
-                # Alpha Vantage 4h aralığı sağlamaz, 60min kullanacağız.
-                interval = '60min'
-            else:
-                interval = timeframe.replace('h', 'min')
-
-        url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}&outputsize=full&apikey={self.av_api_key}"
-        if interval:
-            url += f"&interval={interval}"
-
+    async def _fetch_yahoo(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+        """Yahoo Finance'den veri çek"""
         await RATE_LIMITER.acquire()
-        
-        async with self.session.get(url, timeout=CONFIG.http_timeout) as response:
-            if response.status != 200:
-                raise ValueError(f"HTTP {response.status}")
-            data = await response.json()
-            
-            if 'Error Message' in data:
-                raise ValueError(f"Alpha Vantage hatası: {data['Error Message']}")
-            
-            time_series_key = "Time Series (Daily)" if function == 'TIME_SERIES_DAILY_ADJUSTED' else f"Time Series ({interval})"
-            if time_series_key not in data:
-                raise ValueError(f"Alpha Vantage'dan veri alınamadı: {data}")
-
-            df = pd.DataFrame.from_dict(data[time_series_key], orient='index').astype(float)
-            df.index = pd.to_datetime(df.index)
-            df = df.sort_index()
-            
-            df.columns = ['open', 'high', 'low', 'close', 'adjusted close', 'volume', 'dividend amount', 'split coefficient'] if function == 'TIME_SERIES_DAILY_ADJUSTED' else ['open', 'high', 'low', 'close', 'volume']
-            df['close'] = df['adjusted close'] if 'adjusted close' in df.columns else df['close']
-            df = df[['open', 'high', 'low', 'close', 'volume']]
-            
-            if len(df) < 50:
-                raise ValueError("Yetersiz veri")
-            
-            df = self._calculate_indicators(df)
-
-            return {
-                "df": df,
-                "current": {
-                    "price": float(df["close"].iloc[-1]),
-                    "volume": float(df["volume"].iloc[-1]),
-                    "rsi": float(df["rsi"].iloc[-1]),
-                    "ema13": float(df["ema13"].iloc[-1]),
-                    "ema55": float(df["ema55"].iloc[-1])
-                }
-            }
-
-    # Hatanın kaynağı olan eksik metodu ekliyoruz
-    def _generate_mock_data(self, symbol: str) -> Dict[str, Any]:
-        """Test amaçlı sahte veri oluşturur."""
-        logger.debug(f"Sahte veri oluşturuluyor: {symbol}")
-        # Basit bir sahte veri seti oluşturma
-        dates = pd.to_datetime(pd.date_range(end=dt.datetime.now(), periods=100))
-        data = {
-            "close": np.random.rand(100) * 100 + 50,
-            "open": np.random.rand(100) * 100 + 50,
-            "high": np.random.rand(100) * 100 + 50,
-            "low": np.random.rand(100) * 100 + 50,
-            "volume": np.random.rand(100) * 1_000_000 + 1_000_000
+        yf_symbol = f"{symbol}.IS"
+        interval_map = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
+        interval = interval_map.get(timeframe, "1h")
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
+        params = {
+            "interval": interval,
+            "period1": int((dt.datetime.now() - dt.timedelta(days=90)).timestamp()),
+            "period2": int(dt.datetime.now().timestamp()),
+            "includePrePost": "false"
         }
-        df = pd.DataFrame(data, index=dates)
+        try:
+            async with self.session.get(url, params=params, timeout=CONFIG.http_timeout) as response:
+                if response.status != 200:
+                    raise ValueError(f"HTTP {response.status}")
+                data = await response.json()
+                result = data.get("chart", {}).get("result", [])
+                if not result:
+                    raise ValueError("Boş sonuç")
+                quote = result[0]
+                timestamps = quote.get("timestamp", [])
+                indicators = quote.get("indicators", {})
+                quote_data = indicators.get("quote", [{}])[0]
+                if not timestamps or not quote_data:
+                    raise ValueError("Veri eksik")
+                closes = quote_data.get("close", [])
+                volumes = quote_data.get("volume", [])
+                highs = quote_data.get("high", [])
+                lows = quote_data.get("low", [])
+                opens = quote_data.get("open", [])
+                if not closes or len(closes) < 50:
+                    raise ValueError("Yetersiz veri")
+                df_data = {
+                    "timestamp": timestamps[-100:], "open": opens[-100:],
+                    "high": highs[-100:], "low": lows[-100:],
+                    "close": closes[-100:], "volume": volumes[-100:]
+                }
+                df = pd.DataFrame(df_data)
+                df = df.dropna()
+                if len(df) < 20:
+                    raise ValueError("Temizleme sonrası yetersiz veri")
+                df = self._calculate_indicators(df)
+                return {
+                    "df": df,
+                    "current": {
+                        "price": float(df["close"].iloc[-1]),
+                        "volume": float(df["volume"].iloc[-1]),
+                        "rsi": float(df["rsi"].iloc[-1]),
+                        "ema13": float(df["ema13"].iloc[-1]),
+                        "ema55": float(df["ema55"].iloc[-1])
+                    }
+                }
+        except aiohttp.ClientError as e:
+            raise RuntimeError(f"Aiohttp veri hatası: {e}")
+        except (ValueError, KeyError) as e:
+            raise ValueError(f"Yahoo Finance veri formatı hatası: {e}")
+            
+    def _generate_mock_data(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Veri kaynakları başarısız olursa sahte veri oluştur"""
+        logger.warning(f"{symbol} için tüm veri kaynakları başarısız oldu. Mock data oluşturuluyor.")
+        # Basit bir DataFrame oluşturma
+        df = pd.DataFrame(
+            np.random.rand(100, 5),
+            columns=["open", "high", "low", "close", "volume"]
+        )
+        df.iloc[:, 0] = np.arange(100) + 100
+        df.iloc[:, 3] = df.iloc[:, 0] + np.random.normal(0, 1, 100)
+        df.iloc[:, 1] = df.iloc[:, 3] + np.random.rand(100)
+        df.iloc[:, 2] = df.iloc[:, 3] - np.random.rand(100)
+        df["volume"] = np.random.randint(1_000_000, 5_000_000, 100)
+        
         df = self._calculate_indicators(df)
         return {
             "df": df,
@@ -440,26 +393,20 @@ class BistDataClient:
                 "ema55": float(df["ema55"].iloc[-1])
             }
         }
+
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Teknik göstergeleri hesapla"""
-        df = df.dropna()
-        if len(df) < 14:
-            df["rsi"] = 50.0
-            df["ema13"] = df["close"].mean()
-            df["ema55"] = df["close"].mean()
-            df["ema233"] = df["close"].mean()
-            return df
-
         delta = df["close"].diff()
         gain = delta.where(delta > 0, 0.0)
         loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.ewm(span=14, adjust=False).mean()
-        avg_loss = loss.ewm(span=14, adjust=False).mean()
+        avg_gain = gain.rolling(window=14).mean()
+        avg_loss = loss.rolling(window=14).mean()
         rs = avg_gain / avg_loss.replace(0, 1e-10)
         df["rsi"] = 100 - (100 / (1 + rs))
-        df["ema13"] = df["close"].ewm(span=13, adjust=False).mean()
-        df["ema55"] = df["close"].ewm(span=55, adjust=False).mean()
-        df["ema233"] = df["close"].ewm(span=min(233, max(3, len(df)//2)), adjust=False).mean()
+        df["rsi"] = df["rsi"].fillna(50)
+        df["ema13"] = df["close"].ewm(span=13).mean()
+        df["ema55"] = df["close"].ewm(span=55).mean()
+        df["ema233"] = df["close"].ewm(span=min(233, max(3, len(df)//2))).mean()
         return df
 
 # -------------------- SİNYAL ANALİZİ --------------------
@@ -632,28 +579,12 @@ class BistTelegramNotifier:
             ax1.plot(dates, recent_data["close"], label="Fiyat", color='dodgerblue')
             ax1.plot(dates, recent_data["ema13"], label="EMA13", color='orange', linestyle='--')
             ax1.plot(dates, recent_data["ema55"], label="EMA55", color='red', linestyle='--')
-            
-            # Altın Haç ve Ölüm Haçı noktalarını doğru şekilde işaretlemek için
-            golden_cross_indices = recent_data.index[
-                (recent_data['ema13'].shift(1) < recent_data['ema55'].shift(1)) & 
-                (recent_data['ema13'] > recent_data['ema55'])
-            ]
-            death_cross_indices = recent_data.index[
-                (recent_data['ema13'].shift(1) > recent_data['ema55'].shift(1)) & 
-                (recent_data['ema13'] < recent_data['ema55'])
-            ]
-            
-            # İlk işaretçi için etiket ekleme
-            if not golden_cross_indices.empty:
-                ax1.axvline(x=dates[recent_data.index.get_loc(golden_cross_indices[0])], color='green', linestyle=':', linewidth=2, label='Golden Cross')
-                for idx in golden_cross_indices[1:]:
-                    ax1.axvline(x=dates[recent_data.index.get_loc(idx)], color='green', linestyle=':', linewidth=2)
-            
-            if not death_cross_indices.empty:
-                ax1.axvline(x=dates[recent_data.index.get_loc(death_cross_indices[0])], color='purple', linestyle=':', linewidth=2, label='Death Cross')
-                for idx in death_cross_indices[1:]:
-                    ax1.axvline(x=dates[recent_data.index.get_loc(idx)], color='purple', linestyle=':', linewidth=2)
-
+            if len(recent_data) > 2:
+                for i in range(1, len(recent_data)):
+                    if (recent_data['ema13'].iloc[i-1] < recent_data['ema55'].iloc[i-1] and recent_data['ema13'].iloc[i] > recent_data['ema55'].iloc[i]):
+                        ax1.axvline(x=dates[i], color='green', linestyle=':', linewidth=2, label='Golden Cross')
+                    elif (recent_data['ema13'].iloc[i-1] > recent_data['ema55'].iloc[i-1] and recent_data['ema13'].iloc[i] < recent_data['ema55'].iloc[i]):
+                        ax1.axvline(x=dates[i], color='purple', linestyle=':', linewidth=2, label='Death Cross')
             ax1.set_title(f"{symbol} - {signal_info['direction']} Sinyali", fontsize=14, fontweight='bold')
             ax1.legend()
             ax1.grid(True, alpha=0.3)
@@ -708,7 +639,7 @@ async def send_signal_notification(telegram: BistTelegramNotifier, signal_info: 
         msg_lines.append("")
         msg_lines.append("<b>Sinyal bileşenleri:</b>")
         for k, v in signal_info.get("signals", {}).items():
-            msg_lines.append(f"- {k}: {v:.2f}")
+            msg_lines.append(f"- {k}: {v}")
         message = "\n".join(msg_lines)
         await telegram.send_message(message)
         main_tf = "1h" if "1h" in timeframe_data else next(iter(timeframe_data))
@@ -756,7 +687,7 @@ async def scan_symbols(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
                         data = await data_client._fetch_with_fallback(symbol, tf)
                         if data:
                             timeframe_data[tf] = data
-                    except Exception as e:
+                    except (ValueError, RuntimeError, KeyError) as e:
                         logger.debug(f"{symbol} {tf} veri hatası: {e}")
                         continue
                 if not timeframe_data:
