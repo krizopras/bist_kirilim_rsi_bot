@@ -3,27 +3,32 @@ services:
     name: bist-bot
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python bot_bist.py"
+    startCommand: "python3 bot_bist.py"
     plan: starter
-    autoDeploy: true
+    healthCheckPath: /health
     envVars:
+      # Ortam değişkenlerinizi Render paneline eklemelisiniz.
       - key: TELEGRAM_BOT_TOKEN
-        sync: false # Güvenlik için, değeri Render panelinden ekleyin
+        sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
       - key: MIN_VOLUME_TRY
         value: "1000000"
-      - key: MAX_SYMBOLS
-        value: "100"
       - key: MIN_SIGNAL_SCORE
         value: "2.5"
+      - key: SCAN_INTERVAL_SEC
+        value: "900"
       - key: CONCURRENCY
         value: "5"
+      - key: TEST_MODE
+        value: "false"
+      - key: LOG_LEVEL
+        value: "INFO"
       - key: SIGNAL_COOLDOWN_H
         value: "6"
       - key: MIN_PRICE
         value: "1.0"
-      - key: SCAN_INTERVAL_SEC
-        value: "900"
-      - key: LOG_LEVEL
-        value: "INFO"
+      - key: HOST
+        value: "0.0.0.0"
+      - key: PORT
+        value: "8080"
