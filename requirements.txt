@@ -3,3 +3,4 @@ pandas
 aiohttp
 pytz
 matplotlib
+yfinance
