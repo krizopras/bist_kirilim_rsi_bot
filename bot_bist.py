@@ -28,6 +28,7 @@ import pandas as pd
 import aiohttp
 from aiohttp import web
 import pytz
+import yfinance as yf
 
 # Matplotlib backend ayarı
 import matplotlib
@@ -258,8 +259,9 @@ def is_market_hours() -> bool:
 
     return CONFIG.market_open <= current_time <= CONFIG.market_close
 
-# -------------------- COOLDOWN YÖNETIMİ --------------------
+# -------------------- COOLDOWN YÖNETİMİ --------------------
 async def is_in_cooldown(symbol: str) -> bool:
+    # `utcnow()` yerine `now(timezone.utc)` kullanıldı
     lookback = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=CONFIG.signal_cooldown_h)
     
     # Not: Büyük dosyalarda performans sorununu önlemek için
@@ -296,89 +298,65 @@ async def mark_signal_sent(symbol: str, entry: float, score: float, rsi: float, 
 class BistDataClient:
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
-        # Alpha Vantage için API anahtarını çevre değişkeninden al
         self.av_api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
 
     async def _fetch_with_fallback(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
         """Fallback veri kaynakları ile veri çekme"""
-        # 1. Öncelik: Alpha Vantage
+        # 1. Öncelik: Yahoo Finance (yfinance kütüphanesi)
+        try:
+            return await self._fetch_yahoo_yfinance(symbol, timeframe)
+        except Exception as e:
+            logger.debug(f"Yahoo Finance başarısız {symbol}: {e}")
+
+        # 2. Öncelik: Alpha Vantage
         if self.av_api_key:
             try:
                 return await self._fetch_alpha_vantage(symbol, timeframe)
             except Exception as e:
                 logger.debug(f"Alpha Vantage başarısız {symbol}: {e}")
 
-        # 2. Öncelik: Yahoo Finance
-        try:
-            return await self._fetch_yahoo(symbol, timeframe)
-        except Exception as e:
-            logger.debug(f"Yahoo Finance başarısız {symbol}: {e}")
-
         # 3. Son Çare: Mock data
-        # Hata veren satırı düzeltiyoruz.
         logger.warning(f"{symbol} için tüm veri kaynakları başarısız oldu. Mock data oluşturuluyor.")
         return self._generate_mock_data(symbol)
 
-    async def _fetch_yahoo(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-        """Yahoo Finance'den veri çek"""
-        await RATE_LIMITER.acquire()
-        yf_symbol = f"{symbol}"
-        if not yf_symbol.endswith('.IS'):
-            yf_symbol = f"{yf_symbol}.IS"
-        interval_map = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
-        interval = interval_map.get(timeframe, "1h")
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
-        params = {
-            "interval": interval,
-            "period1": int((dt.datetime.now() - dt.timedelta(days=90)).timestamp()),
-            "period2": int(dt.datetime.now().timestamp()),
-            "includePrePost": "false"
-        }
+    async def _fetch_yahoo_yfinance(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+        """yfinance kütüphanesi ile veri çekme"""
+        yf_symbol = symbol.replace('.IS', '') + '.IS'
+        interval_map = {"15m": "15m", "1h": "1h", "4h": "60m", "1d": "1d"}
+        interval = interval_map.get(timeframe, "1d")
+
         try:
-            async with self.session.get(url, params=params, timeout=CONFIG.http_timeout) as response:
-                if response.status != 200:
-                    raise ValueError(f"HTTP {response.status}")
-                data = await response.json()
-                result = data.get("chart", {}).get("result", [])
-                if not result:
-                    raise ValueError("Boş sonuç")
-                quote = result[0]
-                timestamps = quote.get("timestamp", [])
-                indicators = quote.get("indicators", {})
-                quote_data = indicators.get("quote", [{}])[0]
-                if not timestamps or not quote_data:
-                    raise ValueError("Veri eksik")
-                closes = quote_data.get("close", [])
-                volumes = quote_data.get("volume", [])
-                highs = quote_data.get("high", [])
-                lows = quote_data.get("low", [])
-                opens = quote_data.get("open", [])
-                if not closes or len(closes) < 50:
-                    raise ValueError("Yetersiz veri")
-                df_data = {
-                    "timestamp": timestamps[-100:], "open": opens[-100:],
-                    "high": highs[-100:], "low": lows[-100:],
-                    "close": closes[-100:], "volume": volumes[-100:]
+            # yfinance'ı asenkron olarak çalıştırmak için executor kullanıyoruz
+            loop = asyncio.get_running_loop()
+            df = await loop.run_in_executor(
+                None,
+                yf.download,
+                yf_symbol,
+                period="90d",
+                interval=interval,
+                progress=False
+            )
+            
+            if df.empty or len(df) < 50:
+                raise ValueError("Yetersiz veya boş veri")
+
+            df.columns = [col.lower().replace(' ', '_') for col in df.columns]
+            df = df.rename(columns={'adj_close': 'close'})
+            
+            df = self._calculate_indicators(df)
+
+            return {
+                "df": df,
+                "current": {
+                    "price": float(df["close"].iloc[-1]),
+                    "volume": float(df["volume"].iloc[-1]),
+                    "rsi": float(df["rsi"].iloc[-1]),
+                    "ema13": float(df["ema13"].iloc[-1]),
+                    "ema55": float(df["ema55"].iloc[-1])
                 }
-                df = pd.DataFrame(df_data)
-                df = df.dropna()
-                if len(df) < 20:
-                    raise ValueError("Temizleme sonrası yetersiz veri")
-                df = self._calculate_indicators(df)
-                return {
-                    "df": df,
-                    "current": {
-                        "price": float(df["close"].iloc[-1]),
-                        "volume": float(df["volume"].iloc[-1]),
-                        "rsi": float(df["rsi"].iloc[-1]),
-                        "ema13": float(df["ema13"].iloc[-1]),
-                        "ema55": float(df["ema55"].iloc[-1])
-                    }
-                }
-        except aiohttp.ClientError as e:
-            raise RuntimeError(f"Aiohttp veri hatası: {e}")
-        except (ValueError, KeyError) as e:
-            raise ValueError(f"Yahoo Finance veri formatı hatası: {e}")
+            }
+        except (ValueError, KeyError, yf.YFinanceException) as e:
+            raise ValueError(f"yfinance veri hatası: {e}")
 
     async def _fetch_alpha_vantage(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
         """Alpha Vantage'dan veri çekme fonksiyonu"""
