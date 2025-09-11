@@ -18,7 +18,7 @@ import asyncio
 import logging
 import signal
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple, Any
 import sys
 import locale
@@ -315,12 +315,16 @@ class BistDataClient:
             logger.debug(f"Yahoo Finance başarısız {symbol}: {e}")
 
         # 3. Son Çare: Mock data
+        # Hata veren satırı düzeltiyoruz.
+        logger.warning(f"{symbol} için tüm veri kaynakları başarısız oldu. Mock data oluşturuluyor.")
         return self._generate_mock_data(symbol)
 
     async def _fetch_yahoo(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
         """Yahoo Finance'den veri çek"""
         await RATE_LIMITER.acquire()
-        yf_symbol = f"{symbol}.IS"
+        yf_symbol = f"{symbol}"
+        if not yf_symbol.endswith('.IS'):
+            yf_symbol = f"{yf_symbol}.IS"
         interval_map = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
         interval = interval_map.get(timeframe, "1h")
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
@@ -391,7 +395,7 @@ class BistDataClient:
             else:
                 interval = timeframe.replace('h', 'min')
 
-        url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}.IS&outputsize=full&apikey={self.av_api_key}"
+        url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}&outputsize=full&apikey={self.av_api_key}"
         if interval:
             url += f"&interval={interval}"
 
@@ -432,19 +436,52 @@ class BistDataClient:
                     "ema55": float(df["ema55"].iloc[-1])
                 }
             }
+
+    # Hatanın kaynağı olan eksik metodu ekliyoruz
+    def _generate_mock_data(self, symbol: str) -> Dict[str, Any]:
+        """Test amaçlı sahte veri oluşturur."""
+        logger.debug(f"Sahte veri oluşturuluyor: {symbol}")
+        # Basit bir sahte veri seti oluşturma
+        dates = pd.to_datetime(pd.date_range(end=dt.datetime.now(), periods=100))
+        data = {
+            "close": np.random.rand(100) * 100 + 50,
+            "open": np.random.rand(100) * 100 + 50,
+            "high": np.random.rand(100) * 100 + 50,
+            "low": np.random.rand(100) * 100 + 50,
+            "volume": np.random.rand(100) * 1_000_000 + 1_000_000
+        }
+        df = pd.DataFrame(data, index=dates)
+        df = self._calculate_indicators(df)
+        return {
+            "df": df,
+            "current": {
+                "price": float(df["close"].iloc[-1]),
+                "volume": float(df["volume"].iloc[-1]),
+                "rsi": float(df["rsi"].iloc[-1]),
+                "ema13": float(df["ema13"].iloc[-1]),
+                "ema55": float(df["ema55"].iloc[-1])
+            }
+        }
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Teknik göstergeleri hesapla"""
+        df = df.dropna()
+        if len(df) < 14:
+            df["rsi"] = 50.0
+            df["ema13"] = df["close"].mean()
+            df["ema55"] = df["close"].mean()
+            df["ema233"] = df["close"].mean()
+            return df
+
         delta = df["close"].diff()
         gain = delta.where(delta > 0, 0.0)
         loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.rolling(window=14).mean()
-        avg_loss = loss.rolling(window=14).mean()
+        avg_gain = gain.ewm(span=14, adjust=False).mean()
+        avg_loss = loss.ewm(span=14, adjust=False).mean()
         rs = avg_gain / avg_loss.replace(0, 1e-10)
         df["rsi"] = 100 - (100 / (1 + rs))
-        df["rsi"] = df["rsi"].fillna(50)
-        df["ema13"] = df["close"].ewm(span=13).mean()
-        df["ema55"] = df["close"].ewm(span=55).mean()
-        df["ema233"] = df["close"].ewm(span=min(233, max(3, len(df)//2))).mean()
+        df["ema13"] = df["close"].ewm(span=13, adjust=False).mean()
+        df["ema55"] = df["close"].ewm(span=55, adjust=False).mean()
+        df["ema233"] = df["close"].ewm(span=min(233, max(3, len(df)//2)), adjust=False).mean()
         return df
 
 # -------------------- SİNYAL ANALİZİ --------------------
@@ -617,12 +654,28 @@ class BistTelegramNotifier:
             ax1.plot(dates, recent_data["close"], label="Fiyat", color='dodgerblue')
             ax1.plot(dates, recent_data["ema13"], label="EMA13", color='orange', linestyle='--')
             ax1.plot(dates, recent_data["ema55"], label="EMA55", color='red', linestyle='--')
-            if len(recent_data) > 2:
-                for i in range(1, len(recent_data)):
-                    if (recent_data['ema13'].iloc[i-1] < recent_data['ema55'].iloc[i-1] and recent_data['ema13'].iloc[i] > recent_data['ema55'].iloc[i]):
-                        ax1.axvline(x=dates[i], color='green', linestyle=':', linewidth=2, label='Golden Cross')
-                    elif (recent_data['ema13'].iloc[i-1] > recent_data['ema55'].iloc[i-1] and recent_data['ema13'].iloc[i] < recent_data['ema55'].iloc[i]):
-                        ax1.axvline(x=dates[i], color='purple', linestyle=':', linewidth=2, label='Death Cross')
+            
+            # Altın Haç ve Ölüm Haçı noktalarını doğru şekilde işaretlemek için
+            golden_cross_indices = recent_data.index[
+                (recent_data['ema13'].shift(1) < recent_data['ema55'].shift(1)) & 
+                (recent_data['ema13'] > recent_data['ema55'])
+            ]
+            death_cross_indices = recent_data.index[
+                (recent_data['ema13'].shift(1) > recent_data['ema55'].shift(1)) & 
+                (recent_data['ema13'] < recent_data['ema55'])
+            ]
+            
+            # İlk işaretçi için etiket ekleme
+            if not golden_cross_indices.empty:
+                ax1.axvline(x=dates[recent_data.index.get_loc(golden_cross_indices[0])], color='green', linestyle=':', linewidth=2, label='Golden Cross')
+                for idx in golden_cross_indices[1:]:
+                    ax1.axvline(x=dates[recent_data.index.get_loc(idx)], color='green', linestyle=':', linewidth=2)
+            
+            if not death_cross_indices.empty:
+                ax1.axvline(x=dates[recent_data.index.get_loc(death_cross_indices[0])], color='purple', linestyle=':', linewidth=2, label='Death Cross')
+                for idx in death_cross_indices[1:]:
+                    ax1.axvline(x=dates[recent_data.index.get_loc(idx)], color='purple', linestyle=':', linewidth=2)
+
             ax1.set_title(f"{symbol} - {signal_info['direction']} Sinyali", fontsize=14, fontweight='bold')
             ax1.legend()
             ax1.grid(True, alpha=0.3)
@@ -677,7 +730,7 @@ async def send_signal_notification(telegram: BistTelegramNotifier, signal_info: 
         msg_lines.append("")
         msg_lines.append("<b>Sinyal bileşenleri:</b>")
         for k, v in signal_info.get("signals", {}).items():
-            msg_lines.append(f"- {k}: {v}")
+            msg_lines.append(f"- {k}: {v:.2f}")
         message = "\n".join(msg_lines)
         await telegram.send_message(message)
         main_tf = "1h" if "1h" in timeframe_data else next(iter(timeframe_data))
@@ -725,7 +778,7 @@ async def scan_symbols(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
                         data = await data_client._fetch_with_fallback(symbol, tf)
                         if data:
                             timeframe_data[tf] = data
-                    except (ValueError, RuntimeError, KeyError) as e:
+                    except Exception as e:
                         logger.debug(f"{symbol} {tf} veri hatası: {e}")
                         continue
                 if not timeframe_data:
