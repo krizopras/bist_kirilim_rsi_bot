@@ -296,7 +296,6 @@ async def mark_signal_sent(symbol: str, entry: float, score: float, rsi: float, 
 class BistDataClient:
     def __init__(self, session: aiohttp.ClientSession):
         self.session = session
-        self.av_api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
 
     async def _fetch_with_fallback(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
         """Fallback veri kaynakları ile veri çekme"""
@@ -306,13 +305,15 @@ class BistDataClient:
         except Exception as e:
             logger.debug(f"Yahoo Finance başarısız {symbol}: {e}")
 
-        # 2. Son Çare: Mock data
-        return self._generate_mock_data(symbol)
+        # 2. Son Çare: Mock data (sadece test modunda)
+        if TEST_MODE:
+            return self._generate_mock_data(symbol)
+        return None
 
     async def _fetch_yahoo(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
         """Yahoo Finance'den veri çek"""
         await RATE_LIMITER.acquire()
-        yf_symbol = f"{symbol}.IS"
+        yf_symbol = f"{symbol.replace('.', '')}.IS"  # Düzeltildi: noktaları kaldır
         interval_map = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
         interval = interval_map.get(timeframe, "1h")
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
@@ -367,32 +368,6 @@ class BistDataClient:
             raise RuntimeError(f"Aiohttp veri hatası: {e}")
         except (ValueError, KeyError) as e:
             raise ValueError(f"Yahoo Finance veri formatı hatası: {e}")
-            
-    def _generate_mock_data(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Veri kaynakları başarısız olursa sahte veri oluştur"""
-        logger.warning(f"{symbol} için tüm veri kaynakları başarısız oldu. Mock data oluşturuluyor.")
-        # Basit bir DataFrame oluşturma
-        df = pd.DataFrame(
-            np.random.rand(100, 5),
-            columns=["open", "high", "low", "close", "volume"]
-        )
-        df.iloc[:, 0] = np.arange(100) + 100
-        df.iloc[:, 3] = df.iloc[:, 0] + np.random.normal(0, 1, 100)
-        df.iloc[:, 1] = df.iloc[:, 3] + np.random.rand(100)
-        df.iloc[:, 2] = df.iloc[:, 3] - np.random.rand(100)
-        df["volume"] = np.random.randint(1_000_000, 5_000_000, 100)
-        
-        df = self._calculate_indicators(df)
-        return {
-            "df": df,
-            "current": {
-                "price": float(df["close"].iloc[-1]),
-                "volume": float(df["volume"].iloc[-1]),
-                "rsi": float(df["rsi"].iloc[-1]),
-                "ema13": float(df["ema13"].iloc[-1]),
-                "ema55": float(df["ema55"].iloc[-1])
-            }
-        }
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Teknik göstergeleri hesapla"""
