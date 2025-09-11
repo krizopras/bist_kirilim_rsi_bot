@@ -260,7 +260,7 @@ def is_market_hours() -> bool:
 
 # -------------------- COOLDOWN YÖNETIMİ --------------------
 async def is_in_cooldown(symbol: str) -> bool:
-    lookback = dt.datetime.utcnow() - dt.timedelta(hours=CONFIG.signal_cooldown_h)
+    lookback = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=CONFIG.signal_cooldown_h)
     
     # Not: Büyük dosyalarda performans sorununu önlemek için
     # sadece son birkaç satırı okumak daha verimli olabilir.
