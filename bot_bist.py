@@ -279,106 +279,106 @@ class BistDataClient:
         if symbol.endswith('.IS'):
             yf_symbol = symbol
         else:
-        yf_symbol = f"{symbol}.IS"
+            yf_symbol = f"{symbol}.IS"
     
-        interval_map = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
+        interval_map = {"15m": "15m", "1h": "1h", "4h": "60m", "1d": "1d"}
         interval = interval_map.get(timeframe, "1h")
     
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
         params = {
-        "interval": interval,
-        "period1": int((dt.datetime.now() - dt.timedelta(days=90)).timestamp()),
-        "period2": int(dt.datetime.now().timestamp()),
-        "includePrePost": "false"
-    }
+            "interval": interval,
+            "period1": int((dt.datetime.now() - dt.timedelta(days=90)).timestamp()),
+            "period2": int(dt.datetime.now().timestamp()),
+            "includePrePost": "false"
+        }
     
-    try:
-        async with self.session.get(url, params=params, timeout=CONFIG.http_timeout) as response:
-            if response.status != 200:
-                raise ValueError(f"HTTP {response.status}")
-            
-            data = await response.json()
-            result = data.get("chart", {}).get("result", [])
-            if not result:
-                raise ValueError("Boş sonuç")
+        try:
+            async with self.session.get(url, params=params, timeout=CONFIG.http_timeout) as response:
+                if response.status != 200:
+                    raise ValueError(f"HTTP {response.status}")
                 
-            quote = result[0]
-            timestamps = quote.get("timestamp", [])
-            indicators = quote.get("indicators", {})
-            quote_data = indicators.get("quote", [{}])[0]
-            
-            if not timestamps or not quote_data:
-                raise ValueError("Veri eksik")
-            
-            # Veri kontrolü ve temizleme
-            closes = quote_data.get("close", [])
-            volumes = quote_data.get("volume", [])
-            highs = quote_data.get("high", [])
-            lows = quote_data.get("low", [])
-            opens = quote_data.get("open", [])
-            
-            # None değerleri filtrele
-            valid_indices = []
-            for i in range(len(timestamps)):
-                if (i < len(closes) and closes[i] is not None and 
-                    i < len(volumes) and volumes[i] is not None and
-                    i < len(highs) and highs[i] is not None and
-                    i < len(lows) and lows[i] is not None and
-                    i < len(opens) and opens[i] is not None):
-                    valid_indices.append(i)
-            
-            if len(valid_indices) < 50:
-                raise ValueError("Yetersiz geçerli veri")
-            
-            # Sadece geçerli verileri al
-            df_data = {
-                "timestamp": [timestamps[i] for i in valid_indices[-100:]],
-                "open": [opens[i] for i in valid_indices[-100:]],
-                "high": [highs[i] for i in valid_indices[-100:]],
-                "low": [lows[i] for i in valid_indices[-100:]],
-                "close": [closes[i] for i in valid_indices[-100:]],
-                "volume": [volumes[i] for i in valid_indices[-100:]]
-            }
-            
-            df = pd.DataFrame(df_data)
-            
-            # Veri doğrulama
-            if len(df) < 20:
-                raise ValueError("Temizleme sonrası yetersiz veri")
-            
-            # Anormal fiyat kontrolü
-            current_price = df.iloc[-1]["close"]
-            if current_price <= 0 or current_price > 10000:  # BIST için makul fiyat aralığı
-                logger.warning(f"{symbol} anormal fiyat: {current_price}")
-            
-            # Debug için fiyat logla
-            logger.debug(f"{symbol} mevcut fiyat: {current_price:.2f}")
-            
-            df = self._calculate_all_indicators(df, timeframe)
-            current = df.iloc[-1]
-            
-            return {
-                "df": df,
-                "current": {
-                    "price": float(current["close"]),
-                    "volume": float(current["volume"]),
-                    "rsi": float(current.get("rsi", 50)),
-                    "ema_9": float(current.get("ema_9", current["close"])),
-                    "ema_21": float(current.get("ema_21", current["close"])),
-                    "ema_50": float(current.get("ema_50", current["close"])),
-                    "macd": float(current.get("macd", 0)),
-                    "macd_signal": float(current.get("macd_signal", 0)),
-                    "volume_ratio": float(current.get("volume_ratio", 1))
+                data = await response.json()
+                result = data.get("chart", {}).get("result", [])
+                if not result:
+                    raise ValueError("Boş sonuç")
+                    
+                quote = result[0]
+                timestamps = quote.get("timestamp", [])
+                indicators = quote.get("indicators", {})
+                quote_data = indicators.get("quote", [{}])[0]
+                
+                if not timestamps or not quote_data:
+                    raise ValueError("Veri eksik")
+                
+                # Veri kontrolü ve temizleme
+                closes = quote_data.get("close", [])
+                volumes = quote_data.get("volume", [])
+                highs = quote_data.get("high", [])
+                lows = quote_data.get("low", [])
+                opens = quote_data.get("open", [])
+                
+                # None değerleri filtrele
+                valid_indices = []
+                for i in range(len(timestamps)):
+                    if (i < len(closes) and closes[i] is not None and 
+                        i < len(volumes) and volumes[i] is not None and
+                        i < len(highs) and highs[i] is not None and
+                        i < len(lows) and lows[i] is not None and
+                        i < len(opens) and opens[i] is not None):
+                        valid_indices.append(i)
+                
+                if len(valid_indices) < 50:
+                    raise ValueError("Yetersiz geçerli veri")
+                
+                # Sadece geçerli verileri al
+                df_data = {
+                    "timestamp": [timestamps[i] for i in valid_indices[-100:]],
+                    "open": [opens[i] for i in valid_indices[-100:]],
+                    "high": [highs[i] for i in valid_indices[-100:]],
+                    "low": [lows[i] for i in valid_indices[-100:]],
+                    "close": [closes[i] for i in valid_indices[-100:]],
+                    "volume": [volumes[i] for i in valid_indices[-100:]]
                 }
-            }
-            
-    except aiohttp.ClientError as e:
-        raise RuntimeError(f"Aiohttp veri hatası: {e}")
-    except (ValueError, KeyError) as e:
-        raise ValueError(f"Yahoo Finance veri formatı hatası: {e}")
-    except Exception as e:
-        logger.error(f"{symbol} beklenmeyen hata: {e}")
-        raise
+                
+                df = pd.DataFrame(df_data)
+                
+                # Veri doğrulama
+                if len(df) < 20:
+                    raise ValueError("Temizleme sonrası yetersiz veri")
+                
+                # Anormal fiyat kontrolü
+                current_price = df.iloc[-1]["close"]
+                if current_price <= 0 or current_price > 10000:  # BIST için makul fiyat aralığı
+                    logger.warning(f"{symbol} anormal fiyat: {current_price}")
+                
+                # Debug için fiyat logla
+                logger.debug(f"{symbol} mevcut fiyat: {current_price:.2f}")
+                
+                df = self._calculate_all_indicators(df, timeframe)
+                current = df.iloc[-1]
+                
+                return {
+                    "df": df,
+                    "current": {
+                        "price": float(current["close"]),
+                        "volume": float(current["volume"]),
+                        "rsi": float(current.get("rsi", 50)),
+                        "ema_9": float(current.get("ema_9", current["close"])),
+                        "ema_21": float(current.get("ema_21", current["close"])),
+                        "ema_50": float(current.get("ema_50", current["close"])),
+                        "macd": float(current.get("macd", 0)),
+                        "macd_signal": float(current.get("macd_signal", 0)),
+                        "volume_ratio": float(current.get("volume_ratio", 1))
+                    }
+                }
+                
+        except aiohttp.ClientError as e:
+            raise RuntimeError(f"Aiohttp veri hatası: {e}")
+        except (ValueError, KeyError) as e:
+            raise ValueError(f"Yahoo Finance veri formatı hatası: {e}")
+        except Exception as e:
+            logger.error(f"{symbol} beklenmeyen hata: {e}")
+            raise
 
     def _get_strategy_config(self, timeframe: str) -> Dict:
         """Strateji notlarına göre timeframe konfigürasyonu"""
