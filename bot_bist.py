@@ -277,7 +277,7 @@ class BistDataClient:
         # BIST sembol formatını doğru şekilde düzelt
         # Örnek: AGROT.IS -> AGROT.IS (zaten doğru)
         if symbol.endswith('.IS'):
-        yf_symbol = symbol
+            yf_symbol = symbol
         else:
         yf_symbol = f"{symbol}.IS"
     
