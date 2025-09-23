@@ -1084,10 +1084,10 @@ async def send_signal_notification(telegram: BistTelegramNotifier, signal_info: 
         message = "\n".join(msg_lines)
         await telegram.send_message(message)
         
-        # Grafik gönder
-        main_tf = "1h" if "1h" in timeframe_data else next(iter(timeframe_data))
-        main_df = timeframe_data[main_tf]["df"]
-        await telegram.send_chart(symbol, main_df, signal_info)
+        # Grafik gönderimi devre dışı
+        # main_tf = "1h" if "1h" in timeframe_data else next(iter(timeframe_data))
+        # main_df = timeframe_data[main_tf]["df"]
+        # await telegram.send_chart(symbol, main_df, signal_info)
         
     except Exception as e:
         logger.exception(f"Sinyal bildirimi gönderilemedi: {e}")
