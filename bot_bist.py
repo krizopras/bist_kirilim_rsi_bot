@@ -422,7 +422,7 @@ class BistDataClient:
             df['support_level'] = df['low'].rolling(10, min_periods=1).min()
             df['resistance_level'] = df['high'].rolling(10, min_periods=1).max()
             
-            return df.replace([np.inf, -np.inf], np.nan).fillna(method='ffill')
+            return df.replace([np.inf, -np.inf], np.nan).ffill()
             
         except Exception as e:
             logger.error(f"Gösterge hesaplama hatası: {e}")
@@ -434,7 +434,7 @@ class BistDataClient:
             return None
             
         # Basit mock data üret
-        dates = pd.date_range(start='2024-01-01', periods=100, freq='1H')
+        dates = pd.date_range(start='2024-01-01', periods=100, freq='1h')
         np.random.seed(hash(symbol) % 2**32)
         
         prices = 100 + np.cumsum(np.random.randn(100) * 0.5)
