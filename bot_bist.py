@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 import sys
 import locale
-
+import datetime as dt
+from datetime import timezone
 import numpy as np
 import pandas as pd
 import aiohttp
@@ -210,8 +211,11 @@ def is_market_hours() -> bool:
     return CONFIG.market_open <= current_time <= CONFIG.market_close
 
 # -------------------- COOLDOWN YÖNETİMİ --------------------
+
+# Cooldown fonksiyonu düzeltmesi
 async def is_in_cooldown(symbol: str) -> bool:
-    lookback = dt.datetime.utcnow() - dt.timedelta(hours=CONFIG.signal_cooldown_h)
+    # datetime.datetime.utcnow() yerine datetime.now(timezone.utc) kullan
+    lookback = dt.datetime.now(timezone.utc) - dt.timedelta(hours=CONFIG.signal_cooldown_h)
     
     recent_signals = _safe_read_jsonl(SIGNALS_LOG_PATH)[-1000:]
 
@@ -219,7 +223,16 @@ async def is_in_cooldown(symbol: str) -> bool:
         if rec.get("symbol") != symbol:
             continue
         try:
-            ts = dt.datetime.fromisoformat(rec["ts"])
+            # ISO format string'i timezone-aware datetime'a çevir
+            ts_str = rec["ts"]
+            if ts_str.endswith('Z'):
+                ts = dt.datetime.fromisoformat(ts_str[:-1]).replace(tzinfo=timezone.utc)
+            elif '+' in ts_str or ts_str.endswith('+00:00'):
+                ts = dt.datetime.fromisoformat(ts_str)
+            else:
+                # Timezone bilgisi yoksa UTC kabul et
+                ts = dt.datetime.fromisoformat(ts_str).replace(tzinfo=timezone.utc)
+                
             if ts >= lookback:
                 return True
             if ts < lookback:
@@ -228,8 +241,10 @@ async def is_in_cooldown(symbol: str) -> bool:
             continue
     return False
 
+# Mark signal fonksiyonu düzeltmesi  
 async def mark_signal_sent(symbol: str, entry: float, score: float, rsi: float, signal_type: str):
-    ts = dt.datetime.utcnow().isoformat()
+    # UTC timezone ile timestamp oluştur
+    ts = dt.datetime.now(timezone.utc).isoformat()
     rec = {
         "ts": ts,
         "symbol": symbol,
@@ -239,7 +254,6 @@ async def mark_signal_sent(symbol: str, entry: float, score: float, rsi: float, 
         "signal_type": signal_type,
     }
     _append_jsonl(SIGNALS_LOG_PATH, rec)
-
 # -------------------- VERİ KAYNAĞI --------------------
 class BistDataClient:
     def __init__(self, session: aiohttp.ClientSession):
@@ -257,69 +271,114 @@ class BistDataClient:
         return None
 
     async def _fetch_yahoo(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-        """Yahoo Finance'den veri çek"""
-        await RATE_LIMITER.acquire()
-        yf_symbol = f"{symbol.replace('.', '')}.IS"
-        interval_map = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
-        interval = interval_map.get(timeframe, "1h")
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
-        params = {
-            "interval": interval,
-            "period1": int((dt.datetime.now() - dt.timedelta(days=90)).timestamp()),
-            "period2": int(dt.datetime.now().timestamp()),
-            "includePrePost": "false"
-        }
-        try:
-            async with self.session.get(url, params=params, timeout=CONFIG.http_timeout) as response:
-                if response.status != 200:
-                    raise ValueError(f"HTTP {response.status}")
-                data = await response.json()
-                result = data.get("chart", {}).get("result", [])
-                if not result:
-                    raise ValueError("Boş sonuç")
-                quote = result[0]
-                timestamps = quote.get("timestamp", [])
-                indicators = quote.get("indicators", {})
-                quote_data = indicators.get("quote", [{}])[0]
-                if not timestamps or not quote_data:
-                    raise ValueError("Veri eksik")
-                closes = quote_data.get("close", [])
-                volumes = quote_data.get("volume", [])
-                highs = quote_data.get("high", [])
-                lows = quote_data.get("low", [])
-                opens = quote_data.get("open", [])
-                if not closes or len(closes) < 50:
-                    raise ValueError("Yetersiz veri")
-                df_data = {
-                    "timestamp": timestamps[-100:], "open": opens[-100:],
-                    "high": highs[-100:], "low": lows[-100:],
-                    "close": closes[-100:], "volume": volumes[-100:]
-                }
-                df = pd.DataFrame(df_data)
-                df = df.dropna()
-                if len(df) < 20:
-                    raise ValueError("Temizleme sonrası yetersiz veri")
-                df = self._calculate_all_indicators(df, timeframe)
+    """Yahoo Finance'den veri çek - Düzeltilmiş versiyon"""
+    await RATE_LIMITER.acquire()
+    
+    # BIST sembol formatını doğru şekilde düzelt
+    # Örnek: AGROT.IS -> AGROT.IS (zaten doğru)
+    if symbol.endswith('.IS'):
+        yf_symbol = symbol
+    else:
+        yf_symbol = f"{symbol}.IS"
+    
+    interval_map = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
+    interval = interval_map.get(timeframe, "1h")
+    
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
+    params = {
+        "interval": interval,
+        "period1": int((dt.datetime.now() - dt.timedelta(days=90)).timestamp()),
+        "period2": int(dt.datetime.now().timestamp()),
+        "includePrePost": "false"
+    }
+    
+    try:
+        async with self.session.get(url, params=params, timeout=CONFIG.http_timeout) as response:
+            if response.status != 200:
+                raise ValueError(f"HTTP {response.status}")
+            
+            data = await response.json()
+            result = data.get("chart", {}).get("result", [])
+            if not result:
+                raise ValueError("Boş sonuç")
                 
-                current = df.iloc[-1]
-                return {
-                    "df": df,
-                    "current": {
-                        "price": float(current["close"]),
-                        "volume": float(current["volume"]),
-                        "rsi": float(current.get("rsi", 50)),
-                        "ema_9": float(current.get("ema_9", current["close"])),
-                        "ema_21": float(current.get("ema_21", current["close"])),
-                        "ema_50": float(current.get("ema_50", current["close"])),
-                        "macd": float(current.get("macd", 0)),
-                        "macd_signal": float(current.get("macd_signal", 0)),
-                        "volume_ratio": float(current.get("volume_ratio", 1))
-                    }
+            quote = result[0]
+            timestamps = quote.get("timestamp", [])
+            indicators = quote.get("indicators", {})
+            quote_data = indicators.get("quote", [{}])[0]
+            
+            if not timestamps or not quote_data:
+                raise ValueError("Veri eksik")
+            
+            # Veri kontrolü ve temizleme
+            closes = quote_data.get("close", [])
+            volumes = quote_data.get("volume", [])
+            highs = quote_data.get("high", [])
+            lows = quote_data.get("low", [])
+            opens = quote_data.get("open", [])
+            
+            # None değerleri filtrele
+            valid_indices = []
+            for i in range(len(timestamps)):
+                if (i < len(closes) and closes[i] is not None and 
+                    i < len(volumes) and volumes[i] is not None and
+                    i < len(highs) and highs[i] is not None and
+                    i < len(lows) and lows[i] is not None and
+                    i < len(opens) and opens[i] is not None):
+                    valid_indices.append(i)
+            
+            if len(valid_indices) < 50:
+                raise ValueError("Yetersiz geçerli veri")
+            
+            # Sadece geçerli verileri al
+            df_data = {
+                "timestamp": [timestamps[i] for i in valid_indices[-100:]],
+                "open": [opens[i] for i in valid_indices[-100:]],
+                "high": [highs[i] for i in valid_indices[-100:]],
+                "low": [lows[i] for i in valid_indices[-100:]],
+                "close": [closes[i] for i in valid_indices[-100:]],
+                "volume": [volumes[i] for i in valid_indices[-100:]]
+            }
+            
+            df = pd.DataFrame(df_data)
+            
+            # Veri doğrulama
+            if len(df) < 20:
+                raise ValueError("Temizleme sonrası yetersiz veri")
+            
+            # Anormal fiyat kontrolü
+            current_price = df.iloc[-1]["close"]
+            if current_price <= 0 or current_price > 10000:  # BIST için makul fiyat aralığı
+                logger.warning(f"{symbol} anormal fiyat: {current_price}")
+            
+            # Debug için fiyat logla
+            logger.debug(f"{symbol} mevcut fiyat: {current_price:.2f}")
+            
+            df = self._calculate_all_indicators(df, timeframe)
+            current = df.iloc[-1]
+            
+            return {
+                "df": df,
+                "current": {
+                    "price": float(current["close"]),
+                    "volume": float(current["volume"]),
+                    "rsi": float(current.get("rsi", 50)),
+                    "ema_9": float(current.get("ema_9", current["close"])),
+                    "ema_21": float(current.get("ema_21", current["close"])),
+                    "ema_50": float(current.get("ema_50", current["close"])),
+                    "macd": float(current.get("macd", 0)),
+                    "macd_signal": float(current.get("macd_signal", 0)),
+                    "volume_ratio": float(current.get("volume_ratio", 1))
                 }
-        except aiohttp.ClientError as e:
-            raise RuntimeError(f"Aiohttp veri hatası: {e}")
-        except (ValueError, KeyError) as e:
-            raise ValueError(f"Yahoo Finance veri formatı hatası: {e}")
+            }
+            
+    except aiohttp.ClientError as e:
+        raise RuntimeError(f"Aiohttp veri hatası: {e}")
+    except (ValueError, KeyError) as e:
+        raise ValueError(f"Yahoo Finance veri formatı hatası: {e}")
+    except Exception as e:
+        logger.error(f"{symbol} beklenmeyen hata: {e}")
+        raise
 
     def _get_strategy_config(self, timeframe: str) -> Dict:
         """Strateji notlarına göre timeframe konfigürasyonu"""
@@ -1115,7 +1174,6 @@ async def send_scan_summary(telegram: BistTelegramNotifier, results: List[Dict[s
         logger.exception(f"Özet gönderilemedi: {e}")
 
 
-# -------------------- ANA TARAMA FONKSİYONU --------------------
 async def scan_symbols(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
     """Ana tarama fonksiyonu"""
     start_time = time.time()
@@ -1143,16 +1201,30 @@ async def scan_symbols(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
                     try:
                         data = await data_client._fetch_with_fallback(symbol, tf)
                         if data:
+                            # Fiyat doğrulaması ekle
+                            if not await data_client.validate_price_data(symbol, data):
+                                logger.warning(f"{symbol} {tf} fiyat doğrulaması başarısız - veri atlandı")
+                                continue
                             timeframe_data[tf] = data
+                            
+                            # Debug için fiyat bilgilerini logla
+                            current_price = data["current"]["price"]
+                            logger.debug(f"{symbol} {tf} fiyat: {current_price:.2f} TL")
+                            
                     except Exception as e:
                         logger.debug(f"{symbol} {tf} veri hatası: {e}")
                         continue
                 
                 if not timeframe_data:
+                    logger.debug(f"{symbol} - tüm timeframelerde veri alınamadı")
                     return None
                 
                 signal_info = analyzer.analyze_symbol(symbol, timeframe_data)
                 if signal_info:
+                    # Telegram bildiriminden önce fiyat kontrolü
+                    final_price = signal_info["price"]
+                    logger.info(f"✅ {symbol} BUY SİNYAL - Fiyat: {final_price:.2f} TL, Skor: {signal_info['score']:.2f}")
+                    
                     if telegram:
                         await send_signal_notification(telegram, signal_info, timeframe_data)
                     
@@ -1164,7 +1236,6 @@ async def scan_symbols(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
                         signal_info["direction"]
                     )
                     
-                    logger.info(f"✅ BUY SİNYAL: {symbol} - Skor: {signal_info['score']:.2f}")
                     return signal_info
                 
                 return None
@@ -1173,18 +1244,22 @@ async def scan_symbols(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
                 logger.warning(f"{symbol} analiz hatası: {e}")
                 return None
     
+    # Sembol analizlerini paralel olarak çalıştır
     tasks = [analyze_single_symbol(symbol) for symbol in SELECTED_SYMBOLS[:CONFIG.max_symbols]]
     completed = await asyncio.gather(*tasks, return_exceptions=True)
     
+    # Sonuçları topla
     for result in completed:
         if isinstance(result, dict):
             results.append(result)
     
+    # Skora göre sırala
     results.sort(key=lambda x: x["score"], reverse=True)
     elapsed = time.time() - start_time
     
     logger.info(f"✅ Tarama tamamlandı: {elapsed:.1f}s - {len(results)} sinyal bulundu")
     
+    # Özet gönder
     if telegram and results:
         await send_scan_summary(telegram, results, elapsed)
     
