@@ -271,21 +271,21 @@ class BistDataClient:
         return None
 
     async def _fetch_yahoo(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
-    """Yahoo Finance'den veri çek - Düzeltilmiş versiyon"""
-    await RATE_LIMITER.acquire()
+        """Yahoo Finance'den veri çek - Düzeltilmiş versiyon"""
+        await RATE_LIMITER.acquire()
     
-    # BIST sembol formatını doğru şekilde düzelt
-    # Örnek: AGROT.IS -> AGROT.IS (zaten doğru)
-    if symbol.endswith('.IS'):
+        # BIST sembol formatını doğru şekilde düzelt
+        # Örnek: AGROT.IS -> AGROT.IS (zaten doğru)
+        if symbol.endswith('.IS'):
         yf_symbol = symbol
-    else:
+        else:
         yf_symbol = f"{symbol}.IS"
     
-    interval_map = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
-    interval = interval_map.get(timeframe, "1h")
+        interval_map = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
+        interval = interval_map.get(timeframe, "1h")
     
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
-    params = {
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
+        params = {
         "interval": interval,
         "period1": int((dt.datetime.now() - dt.timedelta(days=90)).timestamp()),
         "period2": int(dt.datetime.now().timestamp()),
