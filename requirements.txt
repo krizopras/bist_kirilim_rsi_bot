@@ -2,7 +2,6 @@ Flask
 pandas
 pandas_ta
 yfinance
-matplotlib
+mplfinance
 python-telegram-bot
-aiohttp
 nest_asyncio
