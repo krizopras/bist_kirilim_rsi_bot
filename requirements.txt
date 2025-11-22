@@ -1,5 +1,8 @@
-numpy
+Flask
 pandas
-aiohttp
-pytz
+pandas_ta
+yfinance
 matplotlib
+python-telegram-bot
+aiohttp
+nest_asyncio
